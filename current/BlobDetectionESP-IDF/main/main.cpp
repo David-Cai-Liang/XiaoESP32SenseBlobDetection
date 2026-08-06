@@ -120,6 +120,14 @@ void initThresholdLUT() {
   }
 }
 
+void applyColorMask(camera_fb_t *fb) {
+  uint16_t *buf = (uint16_t *)fb->buf;
+  size_t total_pixels = fb->width * fb->height;
+  for (size_t i = 0; i < total_pixels; i++) {
+    buf[i] = threshold_lut[buf[i]] ? 0xFFFF : 0x0000;
+  }
+}
+
 Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
   uint16_t *buf = (uint16_t *)fb->buf;
   int stride = fb->width;
@@ -338,6 +346,10 @@ void processingTask(void *pvParameters) {
         telem = {0, 0, 0, 0, 0, 0, 0, 0, 0, (uint16_t)MAX_W, (uint16_t)MAX_H};
       }
 
+      // Uncomment if testing binary threshold vision mask
+      applyColorMask(&work_fb);
+
+      // Draw overlays on native Little-Endian buffer
       drawOverlays(&work_fb, tracking_roi, largest, target_locked);
 
       // Byte Swap Pixels for fmt2jpg Big-Endian requirement

@@ -39,6 +39,6 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/esp-idf/soc/esp32s3/cmake_install.cmake")
+  include("C:/Users/dcl22/Videos/XiaoESP32SenseBlobDetection/current/BlobDetectionESP-IDF/build/esp-idf/soc/esp32s3/cmake_install.cmake")
 endif()
 

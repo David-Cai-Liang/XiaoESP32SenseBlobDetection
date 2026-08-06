@@ -39,7 +39,7 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/bootloader/esp-idf/cmake_install.cmake")
+  include("C:/Users/dcl22/Videos/XiaoESP32SenseBlobDetection/current/BlobDetectionESP-IDF/build/bootloader/esp-idf/cmake_install.cmake")
 endif()
 
 if(CMAKE_INSTALL_COMPONENT)
@@ -50,5 +50,5 @@ endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
-file(WRITE "C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/bootloader/${CMAKE_INSTALL_MANIFEST}"
+file(WRITE "C:/Users/dcl22/Videos/XiaoESP32SenseBlobDetection/current/BlobDetectionESP-IDF/build/bootloader/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")

@@ -1,4 +1,4 @@
-# Install script for directory: C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/main
+# Install script for directory: C:/Users/dcl22/Videos/XiaoESP32SenseBlobDetection/current/BlobDetectionESP-IDF/main
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)

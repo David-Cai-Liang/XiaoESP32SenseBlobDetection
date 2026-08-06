@@ -1,4 +1,4 @@
-/* * Data converted from C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/esp-idf/mbedtls/x509_crt_bundle
+/* * Data converted from C:/Users/dcl22/Videos/XiaoESP32SenseBlobDetection/current/BlobDetectionESP-IDF/build/esp-idf/mbedtls/x509_crt_bundle
  */
 .data
 .section .rodata.embedded
