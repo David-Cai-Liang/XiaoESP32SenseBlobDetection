@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/CMakeFiles/bootloader
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/CMakeFiles/bootloader.rule
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/CMakeFiles/bootloader-complete.rule
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+C:/Users/dcl22/Videos/xiaoEsp32Vision/esp32_blob_tracker/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule
