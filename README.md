@@ -47,6 +47,9 @@ The default camera sensor is [OV3660](https://datasheet.iiic.cc/datasheets-0/omn
   - We use JPEG on the output for management and transmission.
 4. We use the LAB based mask to minimize the affect of differing lighting conditions.
   - May change this in the future to HSV for faster processing
+5. BlobDetectionSpeedTest is a slightly modified version of BlobDetectionESP-IDF that removes image streaming and adds timing
+  - Managed to get 130ms loop
+  - Works with speedTest.py
 
 #### Past:
 1. CameraWebServer was the initial reference for the project

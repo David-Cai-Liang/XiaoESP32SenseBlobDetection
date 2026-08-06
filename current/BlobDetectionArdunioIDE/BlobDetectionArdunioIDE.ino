@@ -32,8 +32,8 @@ struct LabThreshold {
 // Tune these exact thresholds using your hardware JPEG tuner script
 static const LabThreshold THRESHOLD_BLIMP = {20, 60, 10, 50, 1, 30};
 
-static const uint32_t AREA_THRESHOLD_LOCKED = 25;
-static const uint32_t AREA_THRESHOLD_SEARCH = 50;
+static const uint32_t AREA_THRESHOLD_LOCKED = 20;
+static const uint32_t AREA_THRESHOLD_SEARCH = 40;
 static const int ROI_PADDING = 30;
 static const int SCAN_STEP = 1;
 

@@ -1,0 +1,33 @@
+# ESP-IDF build directory
+build/
+
+# Generated SDK configuration files
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+sdkconfig.*
+
+# Keep tracked defaults if you use them for project configuration
+!sdkconfig.defaults
+!sdkconfig.defaults.*
+
+# ESP Component Manager files
+dependencies.lock
+managed_components/
+
+# Python / CMake temporary build artifacts
+__pycache__/
+*.pyc
+CMakeCache.txt
+CMakeFiles/
+
+# Common IDE / Editor files
+.vscode/
+.idea/
+.settings/
+*.project
+*.cproject
+
+# System files
+.DS_Store
+Thumbs.db

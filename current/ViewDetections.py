@@ -2,7 +2,7 @@ import serial
 import cv2
 import numpy as np
 import struct
-import time
+import datetime
 
 # Update to match your Xiao COM port:
 # Windows: 'COM3', 'COM4', etc. | Mac/Linux: '/dev/ttyACM0'
@@ -57,9 +57,9 @@ def main():
 
             if img is not None:
                 # Print telemetry array to terminal once per second
-                if time.time() - last_print_time >= 1.0:
-                    last_print_time = time.time()
-                    print(f"Telemetry: {telem_array}")
+                # if time.time() - last_print_time >= 1.0:
+                # last_print_time = time.time()
+                print(f"{datetime.datetime.now()}: {telem_array}")
 
                 # Display frame with ROI overlays drawn in real-time
                 cv2.imshow("Balloon Race USB Stream", img)
