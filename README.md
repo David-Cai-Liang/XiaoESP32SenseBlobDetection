@@ -1,4 +1,6 @@
 Background:
+We are using [Xiao ESP32-S3 Sense](https://www.seeedstudio.com/XIAO-ESP32S3-Sense-p-5639.html)
+The default camera sensor is [OV3660](https://datasheet.iiic.cc/datasheets-0/omnivision_technologies/OV03660-A51A.pdf)
 
 Current:
 How to calibrate?
@@ -24,6 +26,7 @@ How to use the blob detector?
 - You need to flash one of the BlobDetectors on to the Xiao ESP32S3
 - If you want to view the detections, the ESP32 needs to be connected to the computer via USB
 - Run ViewDetections.py to view the live detections
+- Use can see the image after the color mask applied by uncommenting: `applyColorMask(&work_fb);`
 
 How to build the ESP-IDF version of blob detector?
 1. cd .\BlobDetectionESP-IDF
