@@ -1,9 +1,12 @@
-Background:
+#### Background:
+
 We are using [Xiao ESP32-S3 Sense](https://www.seeedstudio.com/XIAO-ESP32S3-Sense-p-5639.html)
+
 The default camera sensor is [OV3660](https://datasheet.iiic.cc/datasheets-0/omnivision_technologies/OV03660-A51A.pdf)
 
-Current:
-How to calibrate?
+#### Current:
+
+##### How to calibrate?
 - Flash BlobDetectionCalibrate.ino on the Xiao ESP32S3
 - Keep the ESP32 connected to the computer via USB
 - Run BlobDetectionCalibrate.py on the computer
@@ -18,24 +21,24 @@ How to calibrate?
 - Every time you make a change to the mask, the current mask details are shown in the terminal
 - You change the default mask inside of BlobDetectionCalibrate.py (Line 14-16)
 
-How to apply the mask to the blob detector?
+##### How to apply the mask to the blob detector?
 - Copy and paste the current mask details from the terminal to the line starting with: `static const LabThreshold THRESHOLD_BLIMP =`
   - This applies to both the version built on ESP-IDF and Ardunio IDE
 
-How to use the blob detector?
+##### How to use the blob detector?
 - You need to flash one of the BlobDetectors on to the Xiao ESP32S3
 - If you want to view the detections, the ESP32 needs to be connected to the computer via USB
 - Run ViewDetections.py to view the live detections
 - Use can see the image after the color mask applied by uncommenting: `applyColorMask(&work_fb);`
 
-How to build the ESP-IDF version of blob detector?
+##### How to build the ESP-IDF version of blob detector?
 1. cd .\BlobDetectionESP-IDF
 2. idf.py fullclean
     - You can also directly delete: build, managed_components, dependencies.lock, sdkconfig
 3. idf.py set-target esp32s3
 4. idf.py -p <PORT> build flash
 
-Notes:
+##### Notes:
 1. PSRAM is required for the scripts to work, due to memory use from precaching the mask.
 2. You will have to use the reset button on the ESP32 before each flashing attempt since the programs use the USB port as well.
 3. Image Path: JPEG -> RGB565 - JPEG
@@ -45,7 +48,7 @@ Notes:
 4. We use the LAB based mask to minimize the affect of differing lighting conditions.
   - May change this in the future to HSV for faster processing
 
-Past:
+#### Past:
 1. CameraWebServer was the initial reference for the project
 2. BlobDetection was the first version (eg. doesn't have precaching)
 3. BlobDetectionSoftAP adds a Wifi access point / Web Server for visual debugging + precaching
