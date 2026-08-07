@@ -12,8 +12,8 @@ MAGIC_HEADER = b'\xff\xaa\x55\xff'
 HEADER_SIZE = 8
 
 l_min, l_max = 20, 60
-a_min, a_max = 5, 50
-b_min, b_max = 0, 30
+a_min, a_max = 10, 50
+b_min, b_max = 1, 30
 
 def print_thresholds():
     print(f"LAB Thresholds -> L:[{l_min}, {l_max}] A:[{a_min}, {a_max}] B:[{b_min}, {b_max}]")
@@ -119,6 +119,8 @@ def main():
                 )
                 screen.blit(hud_text, (5, 5))
                 pygame.display.flip()
+            else:
+                print("No Image Found")
 
 if __name__ == '__main__':
     main()

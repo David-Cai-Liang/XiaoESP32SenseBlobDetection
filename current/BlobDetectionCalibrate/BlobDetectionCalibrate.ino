@@ -59,10 +59,6 @@ void setupCamera() {
   if (s) {
     s->set_vflip(s, 1);
     s->set_hmirror(s, 1);
-    s->set_whitebal(s, 0);
-    s->set_exposure_ctrl(s, 0);
-    s->set_gain_ctrl(s, 1);
-    s->set_aec_value(s, 60);
   }
 }
 
