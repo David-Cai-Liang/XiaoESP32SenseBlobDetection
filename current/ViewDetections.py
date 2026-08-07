@@ -56,9 +56,6 @@ def main():
             img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
             if img is not None:
-                # Print telemetry array to terminal once per second
-                # if time.time() - last_print_time >= 1.0:
-                # last_print_time = time.time()
                 print(f"{datetime.datetime.now()}: {telem_array}")
 
                 # Display frame with ROI overlays drawn in real-time

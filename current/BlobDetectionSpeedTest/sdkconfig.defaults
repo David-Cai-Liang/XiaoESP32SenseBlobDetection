@@ -16,3 +16,5 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # Silence default logs so they do not corrupt the binary stream
 CONFIG_LOG_DEFAULT_LEVEL_NONE=y
 CONFIG_LOG_MAXIMUM_LEVEL_NONE=y
+
+CONFIG_FREERTOS_HZ=1000

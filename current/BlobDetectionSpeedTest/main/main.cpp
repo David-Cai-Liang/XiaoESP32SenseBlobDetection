@@ -37,6 +37,7 @@
 
 #define MAX_W 320
 #define MAX_H 240
+#define MAX_STACK_SIZE 4096 // 4096 entries (16 KB in SRAM) is ample for Scanline Flood Fill
 
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -66,16 +67,16 @@ typedef struct __attribute__((packed)) {
   uint8_t magic[4];     // {0xFF, 0xAA, 0x55, 0xFF}
   uint32_t timestamp;
   TelemetryData telem;
-} Message;
+} FrameHeader;
 
 static Rect tracking_roi = {0, 0, MAX_W, MAX_H};
 static bool target_locked = false;
 static uint16_t heartbeat = 1;
 
 static uint8_t threshold_lut[65536];
-static uint8_t *visited_buf = NULL;
-static uint32_t *stack_buf = NULL;
-static uint8_t *rgb_work_buf = NULL;
+static uint8_t *mask_buf = NULL;     // Allocated in Internal SRAM (76.8 KB)
+static uint32_t *stack_buf = NULL;   // Allocated in Internal SRAM (16 KB)
+static uint8_t *rgb_work_buf = NULL; // Allocated in PSRAM (153.6 KB)
 
 static inline float srgbToLinear(float c) {
   return (c <= 0.04045f) ? (c / 12.92f) : powf((c + 0.055f) / 1.055f, 2.4f);
@@ -120,36 +121,42 @@ void initThresholdLUT() {
   }
 }
 
-void applyColorMask(camera_fb_t *fb) {
-  uint16_t *buf = (uint16_t *)fb->buf;
-  size_t total_pixels = fb->width * fb->height;
-  for (size_t i = 0; i < total_pixels; i++) {
-    buf[i] = threshold_lut[buf[i]] ? 0xFFFF : 0x0000;
+// Pre-mask pass streaming pixels sequentially into fast internal SRAM
+void generateSramMask(const camera_fb_t *fb, Rect roi) {
+  const uint16_t *buf = (const uint16_t *)fb->buf;
+  int stride = fb->width;
+
+  for (int ry = 0; ry < roi.h; ry++) {
+    int img_y = roi.y + ry;
+    int row_idx = img_y * stride;
+    for (int rx = 0; rx < roi.w; rx++) {
+      int img_x = roi.x + rx;
+      int idx = row_idx + img_x;
+      mask_buf[idx] = threshold_lut[buf[idx]] ? 1 : 0;
+    }
   }
 }
 
 Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
-  uint16_t *buf = (uint16_t *)fb->buf;
   int stride = fb->width;
   int rw = roi.w, rh = roi.h;
 
-  memset(visited_buf, 0, rw * rh);
+  generateSramMask(fb, roi);
+
   Blob best = {0, 0, 0, 0, 0, 0, 0};
 
   uint32_t sampled_threshold = area_threshold / (SCAN_STEP * SCAN_STEP);
   if (sampled_threshold < 1) sampled_threshold = 1;
 
   for (int ry = 0; ry < rh; ry += SCAN_STEP) {
-    int v_row = ry * rw;
-    int img_y = (roi.y + ry) * stride;
+    int img_y = roi.y + ry;
+    int row_idx = img_y * stride;
 
     for (int rx = 0; rx < rw; rx += SCAN_STEP) {
-      int vidx = v_row + rx;
-      if (visited_buf[vidx]) continue;
-      visited_buf[vidx] = 1;
+      int img_x = roi.x + rx;
+      int idx = row_idx + img_x;
 
-      uint16_t px = buf[img_y + roi.x + rx];
-      if (!threshold_lut[px]) continue;
+      if (mask_buf[idx] != 1) continue;
 
       int stack_size = 0;
       stack_buf[stack_size++] = ((uint32_t)ry << 16) | (uint16_t)rx;
@@ -158,35 +165,60 @@ Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
       uint32_t count = 0;
       int minX = rx, maxX = rx, minY = ry, maxY = ry;
 
+      // --- Scanline Flood Fill Loop ---
       while (stack_size > 0) {
         uint32_t pos = stack_buf[--stack_size];
-        int cx0 = pos & 0xFFFF;
-        int cy0 = pos >> 16;
+        int seed_x = pos & 0xFFFF;
+        int seed_y = pos >> 16;
 
-        count++;
-        sumX += cx0;
-        sumY += cy0;
-        if (cx0 < minX) minX = cx0;
-        if (cx0 > maxX) maxX = cx0;
-        if (cy0 < minY) minY = cy0;
-        if (cy0 > maxY) maxY = cy0;
+        int row_offset = (roi.y + seed_y) * stride + roi.x;
+        if (mask_buf[row_offset + seed_x] != 1) continue;
 
-        const int dx[4] = {SCAN_STEP, -SCAN_STEP, 0, 0};
-        const int dy[4] = {0, 0, SCAN_STEP, -SCAN_STEP};
+        // Scan left boundary
+        int lx = seed_x;
+        while (lx > 0 && mask_buf[row_offset + lx - 1] == 1) {
+          lx--;
+        }
 
-        for (int d = 0; d < 4; d++) {
-          int nx = cx0 + dx[d];
-          int ny = cy0 + dy[d];
+        // Scan right boundary
+        int rx_span = seed_x;
+        while (rx_span < rw - 1 && mask_buf[row_offset + rx_span + 1] == 1) {
+          rx_span++;
+        }
 
-          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+        // Process horizontal span & clear mask
+        for (int x = lx; x <= rx_span; x++) {
+          mask_buf[row_offset + x] = 0;
+          count++;
+          sumX += x;
+          sumY += seed_y;
+        }
 
-          int nidx = ny * rw + nx;
-          if (visited_buf[nidx]) continue;
-          visited_buf[nidx] = 1;
+        if (lx < minX) minX = lx;
+        if (rx_span > maxX) maxX = rx_span;
+        if (seed_y < minY) minY = seed_y;
+        if (seed_y > maxY) maxY = seed_y;
 
-          uint16_t n_px = buf[(roi.y + ny) * stride + (roi.x + nx)];
-          if (threshold_lut[n_px]) {
-            stack_buf[stack_size++] = ((uint32_t)ny << 16) | (uint16_t)nx;
+        // Push seed points for adjacent lines (above and below)
+        const int dys[2] = {-1, 1};
+        for (int i = 0; i < 2; i++) {
+          int ny = seed_y + dys[i];
+          if (ny < 0 || ny >= rh) continue;
+
+          int n_row_offset = (roi.y + ny) * stride + roi.x;
+          bool in_span = false;
+
+          for (int x = lx; x <= rx_span; x++) {
+            if (mask_buf[n_row_offset + x] == 1) {
+              if (!in_span) {
+                if (stack_size < MAX_STACK_SIZE) {
+                  stack_buf[stack_size++] = ((uint32_t)ny << 16) | (uint16_t)x;
+                }
+                in_span = true;
+              }
+            } else {
+              in_span = false;
+            }
           }
         }
       }
@@ -195,53 +227,14 @@ Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
         best.pixels = count;
         best.x = roi.x + minX;
         best.y = roi.y + minY;
-        best.w = maxX - minX + SCAN_STEP;
-        best.h = maxY - minY + SCAN_STEP;
+        best.w = maxX - minX + 1;
+        best.h = maxY - minY + 1;
         best.cx = roi.x + (int)(sumX / count);
         best.cy = roi.y + (int)(sumY / count);
       }
     }
   }
   return best;
-}
-
-static inline bool inBounds(int x, int y) {
-  return x >= 0 && x < MAX_W && y >= 0 && y < MAX_H;
-}
-
-void drawOverlays(camera_fb_t *fb, Rect roi, Blob blob, bool locked) {
-  uint16_t *buf = (uint16_t *)fb->buf;
-  int stride = fb->width;
-
-  uint16_t COLOR_ROI = locked ? 0x07E0 : 0xFFE0;
-  uint16_t COLOR_BLOB = 0xF800;
-
-  for (int t = 0; t < 2; t++) {
-    for (int x = roi.x - t; x < roi.x + roi.w + t; x++) {
-      if (inBounds(x, roi.y - 1 - t)) buf[(roi.y - 1 - t) * stride + x] = COLOR_ROI;
-      if (inBounds(x, roi.y + roi.h + t)) buf[(roi.y + roi.h + t) * stride + x] = COLOR_ROI;
-    }
-    for (int y = roi.y - t; y < roi.y + roi.h + t; y++) {
-      if (inBounds(roi.x - 1 - t, y)) buf[y * stride + (roi.x - 1 - t)] = COLOR_ROI;
-      if (inBounds(roi.x + roi.w + t, y)) buf[y * stride + (roi.x + roi.w + t)] = COLOR_ROI;
-    }
-  }
-
-  if (blob.pixels > 0) {
-    for (int x = blob.x; x < blob.x + blob.w; x++) {
-      if (inBounds(x, blob.y)) buf[blob.y * stride + x] = COLOR_BLOB;
-      if (inBounds(x, blob.y + blob.h)) buf[(blob.y + blob.h) * stride + x] = COLOR_BLOB;
-    }
-    for (int y = blob.y; y < blob.y + blob.h; y++) {
-      if (inBounds(blob.x, y)) buf[y * stride + blob.x] = COLOR_BLOB;
-      if (inBounds(blob.x + blob.w, y)) buf[y * stride + (blob.x + blob.w)] = COLOR_BLOB;
-    }
-
-    for (int d = -4; d <= 4; d++) {
-      if (inBounds(blob.cx + d, blob.cy)) buf[blob.cy * stride + (blob.cx + d)] = COLOR_BLOB;
-      if (inBounds(blob.cx, blob.cy + d)) buf[(blob.cx + d) * stride + blob.cx] = COLOR_BLOB;
-    }
-  }
 }
 
 void errorLoop() {
@@ -301,7 +294,7 @@ void processingTask(void *pvParameters) {
   while (1) {
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
-      vTaskDelay(pdMS_TO_TICKS(10));
+      taskYIELD();
       continue;
     }
 
@@ -346,24 +339,24 @@ void processingTask(void *pvParameters) {
         telem = {0, 0, 0, 0, 0, 0, 0, 0, 0, (uint16_t)MAX_W, (uint16_t)MAX_H};
       }
 
-        Message message;
-        message.magic[0] = 0xFF; message.magic[1] = 0xAA;
-        message.magic[2] = 0x55; message.magic[3] = 0xFF;
-        message.timestamp = esp_log_timestamp();
-        message.telem = telem;
+      FrameHeader header;
+      header.magic[0] = 0xFF; header.magic[1] = 0xAA;
+      header.magic[2] = 0x55; header.magic[3] = 0xFF;
+      header.timestamp = esp_log_timestamp();
+      header.telem = telem;
 
-        // Send binary stream directly to raw unbuffered stdout
-        fwrite((const void *)&message, 1, sizeof(Message), stdout);
-        fflush(stdout);
-      }
+      // Send telemetry header stream directly to raw unbuffered stdout
+      fwrite((const void *)&header, 1, sizeof(header), stdout);
+      fflush(stdout);
+    }
 
     esp_camera_fb_return(fb);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    taskYIELD();
   }
 }
 
 extern "C" void app_main(void) {
-  // 1. Disable CRLF translation on stdout so raw binary bytes (e.g. 0x0A) are not altered
+  // 1. Disable CRLF translation on stdout so raw binary bytes are not altered
   esp_vfs_dev_usb_serial_jtag_set_tx_line_endings(ESP_LINE_ENDINGS_LF);
   esp_vfs_dev_usb_serial_jtag_set_rx_line_endings(ESP_LINE_ENDINGS_LF);
 
@@ -380,14 +373,15 @@ extern "C" void app_main(void) {
   // 4. Initialize Camera
   setupCamera();
 
-  // 5. Allocate Working Memory in PSRAM
-  size_t max_pixels = MAX_W * MAX_H;
-  visited_buf  = (uint8_t *)heap_caps_malloc(max_pixels, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  stack_buf    = (uint32_t *)heap_caps_malloc(max_pixels * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  rgb_work_buf = (uint8_t *)heap_caps_malloc(max_pixels * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  size_t total_pixels = MAX_W * MAX_H;
 
-  if (!visited_buf || !stack_buf || !rgb_work_buf) {
-    errorLoop(); // Fast blink on PSRAM memory allocation failure
+  // 5. Allocation Strategy: Move heavy random-access buffers to Internal SRAM for max speed
+  mask_buf     = (uint8_t *)heap_caps_malloc(total_pixels, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  stack_buf    = (uint32_t *)heap_caps_malloc(MAX_STACK_SIZE * sizeof(uint32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  rgb_work_buf = (uint8_t *)heap_caps_malloc(total_pixels * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  if (!mask_buf || !stack_buf || !rgb_work_buf) {
+    errorLoop();
   }
 
   initThresholdLUT();

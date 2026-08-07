@@ -5,44 +5,54 @@ import serial
 SERIAL_PORT = 'COM8'
 BAUD_RATE = 115200
 
-# Bytes {0xFF, 0xAA, 0x55, 0xFF} interpreted as little-endian uint32 (<I)
-MAGIC_HEADER = 0xFF55AAFF
+MAGIC_BYTES = b'\xFF\xAA\x55\xFF'
 
-# Format: < (little-endian), I (uint32 timestamp ms), 11H (11 x uint16 telemetry fields)
+# Payload: < (little-endian), I (uint32 timestamp ms), 11H (11 x uint16 telemetry fields)
 PAYLOAD_FORMAT = "<I11H"
 PAYLOAD_SIZE = struct.calcsize(PAYLOAD_FORMAT)  # 26 bytes
+FRAME_SIZE = len(MAGIC_BYTES) + PAYLOAD_SIZE    # 30 bytes total
 
 def main():
     ser = serial.Serial(SERIAL_PORT, BAUD_RATE)
     print(f"Connected to {SERIAL_PORT}. Listening for telemetry frames...")
 
+    buffer = bytearray()
+
     while True:
-        # Step 1: Read 4 header bytes and verify sync marker
-        header_bytes = ser.read(4)
-        if len(header_bytes) < 4:
-            continue
+        # Read available bytes into buffer
+        buffer += ser.read(ser.in_waiting or 1)
 
-        magic = struct.unpack("<I", header_bytes)[0]
+        while len(buffer) >= FRAME_SIZE:
+            # Find location of magic header sequence
+            idx = buffer.find(MAGIC_BYTES)
 
-        if magic == MAGIC_HEADER:
-            # Step 2: Read the remaining 26 payload bytes
-            payload = ser.read(PAYLOAD_SIZE)
-            if len(payload) == PAYLOAD_SIZE:
-                # Step 3: Unpack timestamp (ms) + 11 telemetry fields
-                unpacked = struct.unpack(PAYLOAD_FORMAT, payload)
+            if idx == -1:
+                # Magic not found: keep last 3 bytes (in case header was cut mid-read)
+                buffer = buffer[-(len(MAGIC_BYTES) - 1):]
+                break
 
-                timestamp_ms = int(unpacked[0])
+            if idx > 0:
+                # Discard misaligned bytes preceding header
+                print(f"Misaligned stream: discarded {idx} byte(s)")
+                buffer = buffer[idx:]
 
-                (
-                    hb, roi_x, roi_y, roi_w, roi_h,
-                    cx, cy, w, h, max_w, max_h
-                ) = unpacked[1:]
+            # Verify complete frame is present
+            if len(buffer) < FRAME_SIZE:
+                break
 
-                print(f"Time: {timestamp_ms:<5} | Target CX: {cx}, CY: {cy}")
-        else:
-            # Step 4: Resynchronize stream byte-by-byte if misaligned
-            print("Missaligned")
-            ser.read(1)
+            # Extract payload bytes and slice consumed frame from buffer
+            payload = buffer[len(MAGIC_BYTES):FRAME_SIZE]
+            buffer = buffer[FRAME_SIZE:]
+
+            # Unpack payload
+            unpacked = struct.unpack(PAYLOAD_FORMAT, payload)
+            timestamp_ms = unpacked[0]
+            (
+                hb, roi_x, roi_y, roi_w, roi_h,
+                cx, cy, w, h, max_w, max_h
+            ) = unpacked[1:]
+
+            print(f"Time: {timestamp_ms:<5} | Target CX: {cx}, CY: {cy}")
 
 if __name__ == "__main__":
     main()

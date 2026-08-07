@@ -39,7 +39,7 @@ static const char *TAG = "MAIN";
 
 #define MAX_W 320
 #define MAX_H 240
-#define MAX_STACK_SIZE 8192 // 8192 * 4 bytes = 32 KB (Fits safely in Internal SRAM)
+#define MAX_STACK_SIZE 4096 // 4096 entries (16 KB in SRAM) is ample for Scanline Flood Fill
 
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -77,7 +77,7 @@ static uint16_t heartbeat = 1;
 
 static uint8_t threshold_lut[65536];
 static uint8_t *mask_buf = NULL;     // Internal SRAM (76.8 KB)
-static uint32_t *stack_buf = NULL;   // Internal SRAM (32 KB)
+static uint32_t *stack_buf = NULL;   // Internal SRAM (16 KB)
 static uint8_t *rgb_work_buf = NULL; // PSRAM (153.6 KB)
 
 static inline float srgbToLinear(float c) {
@@ -138,6 +138,14 @@ void generateSramMask(const camera_fb_t *fb, Rect roi) {
   }
 }
 
+void applyColorMask(camera_fb_t *fb) {
+  uint16_t *buf = (uint16_t *)fb->buf;
+  size_t total_pixels = fb->width * fb->height;
+  for (size_t i = 0; i < total_pixels; i++) {
+    buf[i] = threshold_lut[buf[i]] ? 0xFFFF : 0x0000;
+  }
+}
+
 Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
   int stride = fb->width;
   int rw = roi.w, rh = roi.h;
@@ -159,8 +167,6 @@ Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
 
       if (mask_buf[idx] != 1) continue;
 
-      mask_buf[idx] = 0;
-
       int stack_size = 0;
       stack_buf[stack_size++] = ((uint32_t)ry << 16) | (uint16_t)rx;
 
@@ -168,34 +174,59 @@ Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
       uint32_t count = 0;
       int minX = rx, maxX = rx, minY = ry, maxY = ry;
 
+      // --- Scanline Flood Fill Loop ---
       while (stack_size > 0) {
         uint32_t pos = stack_buf[--stack_size];
-        int cx0 = pos & 0xFFFF;
-        int cy0 = pos >> 16;
+        int seed_x = pos & 0xFFFF;
+        int seed_y = pos >> 16;
 
-        count++;
-        sumX += cx0;
-        sumY += cy0;
-        if (cx0 < minX) minX = cx0;
-        if (cx0 > maxX) maxX = cx0;
-        if (cy0 < minY) minY = cy0;
-        if (cy0 > maxY) maxY = cy0;
+        int row_offset = (roi.y + seed_y) * stride + roi.x;
+        if (mask_buf[row_offset + seed_x] != 1) continue;
 
-        const int dx[4] = {SCAN_STEP, -SCAN_STEP, 0, 0};
-        const int dy[4] = {0, 0, SCAN_STEP, -SCAN_STEP};
+        // Scan left boundary
+        int lx = seed_x;
+        while (lx > 0 && mask_buf[row_offset + lx - 1] == 1) {
+          lx--;
+        }
 
-        for (int d = 0; d < 4; d++) {
-          int nx = cx0 + dx[d];
-          int ny = cy0 + dy[d];
+        // Scan right boundary
+        int rx_span = seed_x;
+        while (rx_span < rw - 1 && mask_buf[row_offset + rx_span + 1] == 1) {
+          rx_span++;
+        }
 
-          if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
+        // Process horizontal span & clear mask
+        for (int x = lx; x <= rx_span; x++) {
+          mask_buf[row_offset + x] = 0;
+          count++;
+          sumX += x;
+          sumY += seed_y;
+        }
 
-          int n_idx = (roi.y + ny) * stride + (roi.x + nx);
+        if (lx < minX) minX = lx;
+        if (rx_span > maxX) maxX = rx_span;
+        if (seed_y < minY) minY = seed_y;
+        if (seed_y > maxY) maxY = seed_y;
 
-          if (mask_buf[n_idx] == 1) {
-            mask_buf[n_idx] = 0;
-            if (stack_size < MAX_STACK_SIZE) {
-              stack_buf[stack_size++] = ((uint32_t)ny << 16) | (uint16_t)nx;
+        // Push seed points for adjacent lines (above and below)
+        const int dys[2] = {-1, 1};
+        for (int i = 0; i < 2; i++) {
+          int ny = seed_y + dys[i];
+          if (ny < 0 || ny >= rh) continue;
+
+          int n_row_offset = (roi.y + ny) * stride + roi.x;
+          bool in_span = false;
+
+          for (int x = lx; x <= rx_span; x++) {
+            if (mask_buf[n_row_offset + x] == 1) {
+              if (!in_span) {
+                if (stack_size < MAX_STACK_SIZE) {
+                  stack_buf[stack_size++] = ((uint32_t)ny << 16) | (uint16_t)x;
+                }
+                in_span = true;
+              }
+            } else {
+              in_span = false;
             }
           }
         }
@@ -205,8 +236,8 @@ Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
         best.pixels = count;
         best.x = roi.x + minX;
         best.y = roi.y + minY;
-        best.w = maxX - minX + SCAN_STEP;
-        best.h = maxY - minY + SCAN_STEP;
+        best.w = maxX - minX + 1;
+        best.h = maxY - minY + 1;
         best.cx = roi.x + (int)(sumX / count);
         best.cy = roi.y + (int)(sumY / count);
       }
@@ -302,7 +333,7 @@ void processingTask(void *pvParameters) {
   while (1) {
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
-      vTaskDelay(pdMS_TO_TICKS(10));
+      taskYIELD();
       continue;
     }
 
@@ -347,6 +378,10 @@ void processingTask(void *pvParameters) {
         telem = {0, 0, 0, 0, 0, 0, 0, 0, 0, (uint16_t)MAX_W, (uint16_t)MAX_H};
       }
 
+      // Uncomment if testing binary threshold vision mask
+      applyColorMask(&work_fb);
+
+      // Draw overlays on native Little-Endian buffer
       drawOverlays(&work_fb, tracking_roi, largest, target_locked);
 
       uint16_t *buf16 = (uint16_t *)rgb_work_buf;
@@ -375,7 +410,7 @@ void processingTask(void *pvParameters) {
     }
 
     esp_camera_fb_return(fb);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    taskYIELD();
   }
 }
 
@@ -394,13 +429,13 @@ extern "C" void app_main(void) {
 
   size_t total_pixels = MAX_W * MAX_H;
 
-  // Allocated in internal SRAM (76.8 KB)
+  // Internal SRAM (76.8 KB)
   mask_buf = (uint8_t *)heap_caps_malloc(total_pixels, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-  // Allocated in internal SRAM (32 KB)
+  // Internal SRAM (16 KB)
   stack_buf = (uint32_t *)heap_caps_malloc(MAX_STACK_SIZE * sizeof(uint32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-  // Allocated in PSRAM (153.6 KB)
+  // PSRAM (153.6 KB)
   rgb_work_buf = (uint8_t *)heap_caps_malloc(total_pixels * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
   if (!mask_buf || !stack_buf || !rgb_work_buf) {
