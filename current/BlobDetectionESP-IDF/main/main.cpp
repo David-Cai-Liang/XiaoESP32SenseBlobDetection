@@ -41,7 +41,7 @@ static const char *TAG = "MAIN";
 
 #define MAX_W 320
 #define MAX_H 240
-#define MAX_STACK_SIZE 4096 // 4096 entries (16 KB in SRAM) is ample for Scanline Flood Fill
+#define MAX_STACK_SIZE 4096 // 4096 entries (16 KB in SRAM) for Scanline Flood Fill
 
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -99,8 +99,8 @@ static inline float labF(float t) {
 
 static inline bool inThreshold(int L, int A, int B, const LabThreshold &t) {
   return L >= t.l_min && L <= t.l_max &&
-  A >= t.a_min && A <= t.a_max &&
-  B >= t.b_min && B <= t.b_max;
+         A >= t.a_min && A <= t.a_max &&
+         B >= t.b_min && B <= t.b_max;
 }
 
 void initThresholdLUT() {
@@ -110,9 +110,12 @@ void initThresholdLUT() {
   for (int b = 0; b < 32; b++) b_lin[b] = srgbToLinear(b / 31.0f);
 
   for (uint32_t px = 0; px < 65536; px++) {
-    uint8_t r5 = (px >> 11) & 0x1F;
-    uint8_t g6 = (px >> 5) & 0x3F;
-    uint8_t b5 = px & 0x1F;
+    // Realign Little-Endian uint16_t index to Big-Endian RGB565 sensor pixel format
+    uint16_t native_px = __builtin_bswap16((uint16_t)px);
+
+    uint8_t r5 = (native_px >> 11) & 0x1F;
+    uint8_t g6 = (native_px >> 5) & 0x3F;
+    uint8_t b5 = native_px & 0x1F;
 
     float r = r_lin[r5];
     float g = g_lin[g6];
@@ -132,7 +135,7 @@ void initThresholdLUT() {
   }
 }
 
-void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
+IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
   const uint16_t *buf = (const uint16_t *)fb->buf;
   int stride = fb->width;
 
@@ -166,20 +169,17 @@ void applyColorMaskFast(camera_fb_t *fb) {
   size_t total_words = (fb->width * fb->height) / 2; // Process 2 pixels (32 bits) per step
 
   for (size_t i = 0; i < total_words; i++) {
-    // Read both 16-bit RGB565 pixels into registers
     uint16_t px0 = src16[i * 2];
     uint16_t px1 = src16[i * 2 + 1];
 
-    // Evaluate LUT for both pixels
     uint32_t mask0 = threshold_lut[px0] ? 0x0000FFFF : 0x00000000;
     uint32_t mask1 = threshold_lut[px1] ? 0xFFFF0000 : 0x00000000;
 
-    // Combine both 16-bit masks and perform a single 32-bit store
     dst32[i] = mask0 | mask1;
   }
 }
 
-Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
+IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
   int stride = fb->width;
   int rw = roi.w, rh = roi.h;
 
@@ -284,8 +284,9 @@ void drawOverlays(camera_fb_t *fb, Rect roi, Blob blob, bool locked) {
   uint16_t *buf = (uint16_t *)fb->buf;
   int stride = fb->width;
 
-  uint16_t COLOR_ROI = locked ? 0x07E0 : 0xFFE0;
-  uint16_t COLOR_BLOB = 0xF800;
+  // Pre-swapped Big-Endian colors (Green: 0x07E0 -> 0xE007, Yellow: 0xFFE0 -> 0xE0FF, Red: 0xF800 -> 0x00F8)
+  uint16_t COLOR_ROI  = locked ? 0xE007 : 0xE0FF;
+  uint16_t COLOR_BLOB = 0x00F8;
 
   for (int t = 0; t < 2; t++) {
     for (int x = roi.x - t; x < roi.x + roi.w + t; x++) {
@@ -346,8 +347,7 @@ void setupCamera() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.frame_size = FRAMESIZE_QVGA;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.jpeg_quality = 20;
+  config.pixel_format = PIXFORMAT_RGB565; // Direct raw RGB565 from sensor
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.fb_count = 2;
@@ -367,21 +367,13 @@ FrameResult processFrame() {
     return result;
   }
   result.camera_fb = fb;
-  if (!jpg2rgb565(fb->buf, fb->len, rgb_work_buf, JPG_SCALE_NONE)) {
-    esp_camera_fb_return(fb);
-    return result;
+  result.work_fb = *fb;
+  if (target_locked) {
+    result.blob = findLargestBlob(&result.work_fb, tracking_roi, AREA_THRESHOLD_LOCKED);
+  } else {
+    Rect full = {0, 0, MAX_W, MAX_H};
+    result.blob = findLargestBlob(&result.work_fb, full, AREA_THRESHOLD_SEARCH);
   }
-    result.work_fb.buf = rgb_work_buf;
-    result.work_fb.len = MAX_W * MAX_H * 2;
-    result.work_fb.width = MAX_W;
-    result.work_fb.height = MAX_H;
-    result.work_fb.format = PIXFORMAT_RGB565;
-    if (target_locked) {
-      result.blob = findLargestBlob(&result.work_fb, tracking_roi, AREA_THRESHOLD_LOCKED);
-    } else {
-      Rect full = {0, 0, MAX_W, MAX_H};
-      result.blob = findLargestBlob(&result.work_fb, full, AREA_THRESHOLD_SEARCH);
-    }
   result.valid = true;
   return result;
 }
@@ -390,7 +382,7 @@ TelemetryData buildTelemetry(const Blob &largest) {
   TelemetryData telem;
 
   if (largest.pixels > 0) {
-    heartbeat=esp_log_timestamp();
+    heartbeat = esp_log_timestamp();
 
     int roi_x = MAX(0, largest.x - ROI_PADDING);
     int roi_y = MAX(0, largest.y - ROI_PADDING);
@@ -415,17 +407,9 @@ TelemetryData buildTelemetry(const Blob &largest) {
 }
 
 void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool locked, const TelemetryData &telem) {
-  // Uncomment if testing binary threshold vision mask
-  applyColorMaskFast(work_fb);
+  applyColorMaskFast(work_fb); // Uncomment to output binary vision mask
 
-  // Draw overlays on native Little-Endian buffer
   drawOverlays(work_fb, roi, blob, locked);
-
-  uint16_t *buf16 = (uint16_t *)rgb_work_buf;
-  size_t total_pixels = MAX_W * MAX_H;
-  for (size_t i = 0; i < total_pixels; i++) {
-    buf16[i] = __builtin_bswap16(buf16[i]);
-  }
 
   uint8_t *jpg_buf = NULL;
   size_t jpg_len = 0;
@@ -449,15 +433,15 @@ void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool l
 static void sendTelemetry(const TelemetryData &telem){
   FrameHeader header;
 
-  header.magic[0]=0xFF;
-  header.magic[1]=0xAA;
-  header.magic[2]=0x55;
-  header.magic[3]=0xFF;
+  header.magic[0] = 0xFF;
+  header.magic[1] = 0xAA;
+  header.magic[2] = 0x55;
+  header.magic[3] = 0xFF;
 
   header.payload_len = 0;
   header.telem = telem;
 
-  fwrite(&header,1,sizeof(header),stdout);
+  fwrite(&header, 1, sizeof(header), stdout);
   fflush(stdout);
 }
 
@@ -478,8 +462,8 @@ void processingTask(void *pvParameters) {
 
     esp_camera_fb_return(result.camera_fb);
     taskYIELD();
-    }
   }
+}
 
 extern "C" void app_main(void) {
   esp_vfs_dev_usb_serial_jtag_set_tx_line_endings(ESP_LINE_ENDINGS_LF);
@@ -503,7 +487,7 @@ extern "C" void app_main(void) {
   stack_buf = (uint32_t *)heap_caps_malloc(MAX_STACK_SIZE * sizeof(uint32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
   // PSRAM (153.6 KB)
-  rgb_work_buf = (uint8_t*)heap_caps_malloc(total_pixels*2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  rgb_work_buf = (uint8_t*)heap_caps_malloc(total_pixels * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
   if (!mask_buf || !stack_buf || !rgb_work_buf) {
     ESP_LOGE(TAG, "Heap allocation failed! mask_buf=%p, stack_buf=%p, rgb_work_buf=%p", mask_buf, stack_buf, rgb_work_buf);
