@@ -2,6 +2,7 @@
 #include "esp_camera.h"
 #include "img_converters.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include <math.h>
 
 // Stream modes: 1 = full JPEG frame + Telemetry, 0 = High-rate Telemetry header only
@@ -103,9 +104,12 @@ void initThresholdLUT() {
   for (int b = 0; b < 32; b++) b_lin[b] = srgbToLinear(b / 31.0f);
 
   for (uint32_t px = 0; px < 65536; px++) {
-    uint8_t r5 = (px >> 11) & 0x1F;
-    uint8_t g6 = (px >> 5) & 0x3F;
-    uint8_t b5 = px & 0x1F;
+    // Realign Little-Endian uint16_t index to Big-Endian RGB565 sensor pixel format
+    uint16_t native_px = __builtin_bswap16((uint16_t)px);
+
+    uint8_t r5 = (native_px >> 11) & 0x1F;
+    uint8_t g6 = (native_px >> 5) & 0x3F;
+    uint8_t b5 = native_px & 0x1F;
 
     float r = r_lin[r5];
     float g = g_lin[g6];
@@ -125,7 +129,7 @@ void initThresholdLUT() {
   }
 }
 
-void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
+IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
   const uint16_t *buf = (const uint16_t *)fb->buf;
   int stride = fb->width;
 
@@ -169,7 +173,7 @@ void applyColorMaskFast(camera_fb_t *fb) {
   }
 }
 
-Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
+IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
   int stride = fb->width;
   int rw = roi.w, rh = roi.h;
 
@@ -274,8 +278,9 @@ void drawOverlays(camera_fb_t *fb, Rect roi, Blob blob, bool locked) {
   uint16_t *buf = (uint16_t *)fb->buf;
   int stride = fb->width;
 
-  uint16_t COLOR_ROI = locked ? 0x07E0 : 0xFFE0;
-  uint16_t COLOR_BLOB = 0xF800;
+  // Pre-swapped Big-Endian colors (Green: 0x07E0 -> 0xE007, Yellow: 0xFFE0 -> 0xE0FF, Red: 0xF800 -> 0x00F8)
+  uint16_t COLOR_ROI  = locked ? 0xE007 : 0xE0FF;
+  uint16_t COLOR_BLOB = 0x00F8;
 
   for (int t = 0; t < 2; t++) {
     for (int x = roi.x - t; x < roi.x + roi.w + t; x++) {
@@ -300,7 +305,7 @@ void drawOverlays(camera_fb_t *fb, Rect roi, Blob blob, bool locked) {
 
     for (int d = -4; d <= 4; d++) {
       if (inBounds(blob.cx + d, blob.cy)) buf[blob.cy * stride + (blob.cx + d)] = COLOR_BLOB;
-      if (inBounds(blob.cx, blob.cy + d)) buf[(blob.cx + d) * stride + blob.cx] = COLOR_BLOB;
+      if (inBounds(blob.cx, blob.cy + d)) buf[(blob.cy + d) * stride + blob.cx] = COLOR_BLOB;
     }
   }
 }
@@ -336,8 +341,7 @@ void setupCamera() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.frame_size = FRAMESIZE_QVGA;
-  config.pixel_format = PIXFORMAT_JPEG;
-  config.jpeg_quality = 20;
+  config.pixel_format = PIXFORMAT_RGB565; // Direct raw RGB565 from sensor
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.fb_count = 2;
@@ -346,8 +350,6 @@ void setupCamera() {
   if (err != ESP_OK) {
     errorLoop();
   }
-
-  sensor_t *s = esp_camera_sensor_get();
 }
 
 FrameResult processFrame() {
@@ -357,16 +359,7 @@ FrameResult processFrame() {
   if (!fb) return result;
 
   result.camera_fb = fb;
-  if (!jpg2rgb565(fb->buf, fb->len, rgb_work_buf, JPG_SCALE_NONE)) {
-    esp_camera_fb_return(fb);
-    return result;
-  }
-
-  result.work_fb.buf = rgb_work_buf;
-  result.work_fb.len = MAX_W * MAX_H * 2;
-  result.work_fb.width = MAX_W;
-  result.work_fb.height = MAX_H;
-  result.work_fb.format = PIXFORMAT_RGB565;
+  result.work_fb = *fb;
 
   if (target_locked) {
     result.blob = findLargestBlob(&result.work_fb, tracking_roi, AREA_THRESHOLD_LOCKED);
@@ -383,7 +376,7 @@ TelemetryData buildTelemetry(const Blob &largest) {
   TelemetryData telem;
 
   if (largest.pixels > 0) {
-    heartbeat = (uint16_t)millis();
+    heartbeat = esp_log_timestamp();
 
     int roi_x = MAX(0, largest.x - ROI_PADDING);
     int roi_y = MAX(0, largest.y - ROI_PADDING);
@@ -409,15 +402,9 @@ TelemetryData buildTelemetry(const Blob &largest) {
 }
 
 void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool locked, const TelemetryData &telem) {
-  // Apply visual overlays onto local Little-Endian buffer
-  drawOverlays(work_fb, roi, blob, locked);
+  // applyColorMaskFast(work_fb); // Uncomment to output binary vision mask
 
-  // Swap endianness for JPEG encoding compatibility
-  uint16_t *buf16 = (uint16_t *)rgb_work_buf;
-  size_t total_pixels = MAX_W * MAX_H;
-  for (size_t i = 0; i < total_pixels; i++) {
-    buf16[i] = __builtin_bswap16(buf16[i]);
-  }
+  drawOverlays(work_fb, roi, blob, locked);
 
   uint8_t *jpg_buf = NULL;
   size_t jpg_len = 0;
