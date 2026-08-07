@@ -1,4 +1,5 @@
 #define DEBUG_STREAM 0
+#define MASKED_DEBUG_STREAM 1
 
 #include <stdio.h>
 #include <string.h>
@@ -407,8 +408,9 @@ TelemetryData buildTelemetry(const Blob &largest) {
 }
 
 void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool locked, const TelemetryData &telem) {
-  applyColorMaskFast(work_fb); // Uncomment to output binary vision mask
-
+    #if MASKED_DEBUG_STREAM
+     applyColorMaskFast(work_fb); // Uncomment to output binary vision mask
+    #endif
   drawOverlays(work_fb, roi, blob, locked);
 
   uint8_t *jpg_buf = NULL;

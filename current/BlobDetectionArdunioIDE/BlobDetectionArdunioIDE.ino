@@ -7,6 +7,7 @@
 
 // Stream modes: 1 = full JPEG frame + Telemetry, 0 = High-rate Telemetry header only
 #define DEBUG_STREAM 1
+#define MASKED_DEBUG_STREAM 1
 
 // --- Hardware Pins ---
 #define LED_GPIO_NUM   21 // XIAO ESP32S3 User LED
@@ -402,8 +403,9 @@ TelemetryData buildTelemetry(const Blob &largest) {
 }
 
 void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool locked, const TelemetryData &telem) {
-  // applyColorMaskFast(work_fb); // Uncomment to output binary vision mask
-
+  #if MASKED_DEBUG_STREAM
+    applyColorMaskFast(work_fb); // Uncomment to output binary vision mask
+  #endif
   drawOverlays(work_fb, roi, blob, locked);
 
   uint8_t *jpg_buf = NULL;
