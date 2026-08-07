@@ -48,6 +48,11 @@ def main():
             if len(buffer) < HEADER_SIZE + payload_len:
                 break  # Wait for complete JPEG payload
 
+            if payload_len == 0:
+                print(f"{datetime.datetime.now()}: {telem_array}")
+                buffer = buffer[HEADER_SIZE:]
+                continue
+
             jpg_data = buffer[HEADER_SIZE : HEADER_SIZE + payload_len]
             buffer = buffer[HEADER_SIZE + payload_len:]
 

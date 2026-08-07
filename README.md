@@ -38,6 +38,10 @@ The default camera sensor is [OV3660](https://datasheet.iiic.cc/datasheets-0/omn
 3. idf.py set-target esp32s3
 4. idf.py -p <PORT> build flash
 
+##### How to switch between video streaming and telemetry only in BlobDetectionESP-IDF?
+- For telemetry only, set DEBUG_STREAM 0
+- For video & telemetry, set DEBUG_STREAM 1
+
 ##### Notes:
 1. PSRAM is required for the scripts to work, due to memory use from precaching the mask.
 2. You will have to use the reset button on the ESP32 before each flashing attempt since the programs use the USB port as well.
@@ -47,9 +51,6 @@ The default camera sensor is [OV3660](https://datasheet.iiic.cc/datasheets-0/omn
   - We use JPEG on the output for management and transmission.
 4. We use the LAB based mask to minimize the affect of differing lighting conditions.
   - May change this in the future to HSV for faster processing
-5. BlobDetectionSpeedTest is a slightly modified version of BlobDetectionESP-IDF that removes image streaming and adds timing
-  - Managed to get 130ms loop
-  - Works with speedTest.py
 
 #### Past:
 1. CameraWebServer was the initial reference for the project
@@ -66,3 +67,6 @@ The default camera sensor is [OV3660](https://datasheet.iiic.cc/datasheets-0/omn
   - Uses the same mask creation algorithm as AutoCalibrateWithStdOverROI
   - The masking is performed inside of AutoCalibrateWithStdOverROIWithMasking.ino
   - The viewfinder.py is the same as AutoCalibrateWithStdOverROI
+5. BlobDetectionSpeedTest is a slightly modified version of BlobDetectionESP-IDF that removes image streaming and adds timing
+  - Managed to get 130ms loop
+  - Works with speedTest.py
