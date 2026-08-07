@@ -29,7 +29,7 @@ The default camera sensor is [OV3660](https://datasheet.iiic.cc/datasheets-0/omn
 - You need to flash one of the BlobDetectors on to the Xiao ESP32S3
 - If you want to view the detections, the ESP32 needs to be connected to the computer via USB
 - Run ViewDetections.py to view the live detections
-- Use can see the image after the color mask applied by uncommenting: `applyColorMask(&work_fb);`
+- To see the image after the color mask is applied by uncomment: `applyColorMask(&work_fb);`
 
 ##### How to build the ESP-IDF version of blob detector?
 1. cd .\BlobDetectionESP-IDF
@@ -38,7 +38,7 @@ The default camera sensor is [OV3660](https://datasheet.iiic.cc/datasheets-0/omn
 3. idf.py set-target esp32s3
 4. idf.py -p <PORT> build flash
 
-##### How to switch between video streaming and telemetry only in BlobDetectionESP-IDF?
+##### How to switch between video streaming + telemetry and telemetry only in BlobDetectionESP-IDF?
 - For telemetry only, set DEBUG_STREAM 0
 - For video & telemetry, set DEBUG_STREAM 1
 
