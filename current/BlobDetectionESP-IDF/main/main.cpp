@@ -14,6 +14,8 @@
 
 #include "esp_vfs_usb_serial_jtag.h"
 
+static const char *TAG = "MAIN";
+
 // --- Hardware Pins ---
 #define LED_GPIO_NUM   (gpio_num_t)21 // XIAO ESP32S3 User LED (Active LOW)
 
@@ -37,6 +39,7 @@
 
 #define MAX_W 320
 #define MAX_H 240
+#define MAX_STACK_SIZE 8192 // 8192 * 4 bytes = 32 KB (Fits safely in Internal SRAM)
 
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
@@ -73,9 +76,9 @@ static bool target_locked = false;
 static uint16_t heartbeat = 1;
 
 static uint8_t threshold_lut[65536];
-static uint8_t *visited_buf = NULL;
-static uint32_t *stack_buf = NULL;
-static uint8_t *rgb_work_buf = NULL;
+static uint8_t *mask_buf = NULL;     // Internal SRAM (76.8 KB)
+static uint32_t *stack_buf = NULL;   // Internal SRAM (32 KB)
+static uint8_t *rgb_work_buf = NULL; // PSRAM (153.6 KB)
 
 static inline float srgbToLinear(float c) {
   return (c <= 0.04045f) ? (c / 12.92f) : powf((c + 0.055f) / 1.055f, 2.4f);
@@ -120,36 +123,43 @@ void initThresholdLUT() {
   }
 }
 
-void applyColorMask(camera_fb_t *fb) {
-  uint16_t *buf = (uint16_t *)fb->buf;
-  size_t total_pixels = fb->width * fb->height;
-  for (size_t i = 0; i < total_pixels; i++) {
-    buf[i] = threshold_lut[buf[i]] ? 0xFFFF : 0x0000;
+void generateSramMask(const camera_fb_t *fb, Rect roi) {
+  const uint16_t *buf = (const uint16_t *)fb->buf;
+  int stride = fb->width;
+
+  for (int ry = 0; ry < roi.h; ry++) {
+    int img_y = roi.y + ry;
+    int row_idx = img_y * stride;
+    for (int rx = 0; rx < roi.w; rx++) {
+      int img_x = roi.x + rx;
+      int idx = row_idx + img_x;
+      mask_buf[idx] = threshold_lut[buf[idx]] ? 1 : 0;
+    }
   }
 }
 
 Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
-  uint16_t *buf = (uint16_t *)fb->buf;
   int stride = fb->width;
   int rw = roi.w, rh = roi.h;
 
-  memset(visited_buf, 0, rw * rh);
+  generateSramMask(fb, roi);
+
   Blob best = {0, 0, 0, 0, 0, 0, 0};
 
   uint32_t sampled_threshold = area_threshold / (SCAN_STEP * SCAN_STEP);
   if (sampled_threshold < 1) sampled_threshold = 1;
 
   for (int ry = 0; ry < rh; ry += SCAN_STEP) {
-    int v_row = ry * rw;
-    int img_y = (roi.y + ry) * stride;
+    int img_y = roi.y + ry;
+    int row_idx = img_y * stride;
 
     for (int rx = 0; rx < rw; rx += SCAN_STEP) {
-      int vidx = v_row + rx;
-      if (visited_buf[vidx]) continue;
-      visited_buf[vidx] = 1;
+      int img_x = roi.x + rx;
+      int idx = row_idx + img_x;
 
-      uint16_t px = buf[img_y + roi.x + rx];
-      if (!threshold_lut[px]) continue;
+      if (mask_buf[idx] != 1) continue;
+
+      mask_buf[idx] = 0;
 
       int stack_size = 0;
       stack_buf[stack_size++] = ((uint32_t)ry << 16) | (uint16_t)rx;
@@ -180,13 +190,13 @@ Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
 
           if (nx < 0 || ny < 0 || nx >= rw || ny >= rh) continue;
 
-          int nidx = ny * rw + nx;
-          if (visited_buf[nidx]) continue;
-          visited_buf[nidx] = 1;
+          int n_idx = (roi.y + ny) * stride + (roi.x + nx);
 
-          uint16_t n_px = buf[(roi.y + ny) * stride + (roi.x + nx)];
-          if (threshold_lut[n_px]) {
-            stack_buf[stack_size++] = ((uint32_t)ny << 16) | (uint16_t)nx;
+          if (mask_buf[n_idx] == 1) {
+            mask_buf[n_idx] = 0;
+            if (stack_size < MAX_STACK_SIZE) {
+              stack_buf[stack_size++] = ((uint32_t)ny << 16) | (uint16_t)nx;
+            }
           }
         }
       }
@@ -283,17 +293,8 @@ void setupCamera() {
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    errorLoop(); // Fast blink on camera init fail
-  }
-
-  sensor_t *s = esp_camera_sensor_get();
-  if (s) {
-    s->set_vflip(s, 1);
-    s->set_hmirror(s, 1);
-    s->set_whitebal(s, 0);
-    s->set_exposure_ctrl(s, 0);
-    s->set_gain_ctrl(s, 1);
-    s->set_aec_value(s, 40);
+    ESP_LOGE(TAG, "Camera Init Failed with error 0x%x", err);
+    errorLoop();
   }
 }
 
@@ -346,13 +347,8 @@ void processingTask(void *pvParameters) {
         telem = {0, 0, 0, 0, 0, 0, 0, 0, 0, (uint16_t)MAX_W, (uint16_t)MAX_H};
       }
 
-      // Uncomment if testing binary threshold vision mask
-      applyColorMask(&work_fb);
-
-      // Draw overlays on native Little-Endian buffer
       drawOverlays(&work_fb, tracking_roi, largest, target_locked);
 
-      // Byte Swap Pixels for fmt2jpg Big-Endian requirement
       uint16_t *buf16 = (uint16_t *)rgb_work_buf;
       size_t total_pixels = MAX_W * MAX_H;
       for (size_t i = 0; i < total_pixels; i++) {
@@ -370,7 +366,6 @@ void processingTask(void *pvParameters) {
         header.payload_len = jpg_len;
         header.telem = telem;
 
-        // Send binary stream directly to raw unbuffered stdout
         fwrite((const void *)&header, 1, sizeof(header), stdout);
         fwrite((const void *)jpg_buf, 1, jpg_len, stdout);
         fflush(stdout);
@@ -385,31 +380,32 @@ void processingTask(void *pvParameters) {
 }
 
 extern "C" void app_main(void) {
-  // 1. Disable CRLF translation on stdout so raw binary bytes (e.g. 0x0A) are not altered
   esp_vfs_dev_usb_serial_jtag_set_tx_line_endings(ESP_LINE_ENDINGS_LF);
   esp_vfs_dev_usb_serial_jtag_set_rx_line_endings(ESP_LINE_ENDINGS_LF);
 
-  // 2. Setup User LED
   gpio_reset_pin(LED_GPIO_NUM);
   gpio_set_direction(LED_GPIO_NUM, GPIO_MODE_OUTPUT);
   gpio_set_level(LED_GPIO_NUM, 0); // Solid ON during boot
 
-  // 3. Set stdout to unbuffered binary mode for raw streaming
   setvbuf(stdout, NULL, _IONBF, 0);
-
   vTaskDelay(pdMS_TO_TICKS(500));
 
-  // 4. Initialize Camera
   setupCamera();
 
-  // 5. Allocate Working Memory in PSRAM
-  size_t max_pixels = MAX_W * MAX_H;
-  visited_buf  = (uint8_t *)heap_caps_malloc(max_pixels, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  stack_buf    = (uint32_t *)heap_caps_malloc(max_pixels * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  rgb_work_buf = (uint8_t *)heap_caps_malloc(max_pixels * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  size_t total_pixels = MAX_W * MAX_H;
 
-  if (!visited_buf || !stack_buf || !rgb_work_buf) {
-    errorLoop(); // Fast blink on PSRAM memory allocation failure
+  // Allocated in internal SRAM (76.8 KB)
+  mask_buf = (uint8_t *)heap_caps_malloc(total_pixels, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  // Allocated in internal SRAM (32 KB)
+  stack_buf = (uint32_t *)heap_caps_malloc(MAX_STACK_SIZE * sizeof(uint32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  // Allocated in PSRAM (153.6 KB)
+  rgb_work_buf = (uint8_t *)heap_caps_malloc(total_pixels * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+  if (!mask_buf || !stack_buf || !rgb_work_buf) {
+    ESP_LOGE(TAG, "Heap allocation failed! mask_buf=%p, stack_buf=%p, rgb_work_buf=%p", mask_buf, stack_buf, rgb_work_buf);
+    errorLoop();
   }
 
   initThresholdLUT();
