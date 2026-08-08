@@ -32,7 +32,7 @@
 
 #define MAX_W 320
 #define MAX_H 240
-#define MAX_STACK_SIZE 4096 // 4096 entries (16 KB in SRAM)
+#define MAX_STACK_SIZE 8192 // 8192 entries (32 KB in SRAM)
 
 #ifndef MAX
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
@@ -79,10 +79,9 @@ static Rect tracking_roi = {0, 0, MAX_W, MAX_H};
 static bool target_locked = false;
 static uint16_t heartbeat = 1;
 
-static uint8_t threshold_lut[65536];
+static uint8_t threshold_lut[8192];
 static uint8_t *mask_buf = NULL;     // Internal SRAM (76.8 KB)
 static uint32_t *stack_buf = NULL;   // Internal SRAM (16 KB)
-static uint8_t *rgb_work_buf = NULL; // PSRAM (153.6 KB)
 
 static inline float srgbToLinear(float c) {
   return (c <= 0.04045f) ? (c / 12.92f) : powf((c + 0.055f) / 1.055f, 2.4f);
@@ -99,13 +98,14 @@ static inline bool inThreshold(int L, int A, int B, const LabThreshold &t) {
 }
 
 void initThresholdLUT() {
+  memset(threshold_lut, 0, sizeof(threshold_lut));
+
   float r_lin[32], g_lin[64], b_lin[32];
   for (int r = 0; r < 32; r++) r_lin[r] = srgbToLinear(r / 31.0f);
   for (int g = 0; g < 64; g++) g_lin[g] = srgbToLinear(g / 63.0f);
   for (int b = 0; b < 32; b++) b_lin[b] = srgbToLinear(b / 31.0f);
 
   for (uint32_t px = 0; px < 65536; px++) {
-    // Realign Little-Endian uint16_t index to Big-Endian RGB565 sensor pixel format
     uint16_t native_px = __builtin_bswap16((uint16_t)px);
 
     uint8_t r5 = (native_px >> 11) & 0x1F;
@@ -126,8 +126,14 @@ void initThresholdLUT() {
     int A = (int)(500.0f * (fx - fy));
     int B = (int)(200.0f * (fy - fz));
 
-    threshold_lut[px] = inThreshold(L, A, B, THRESHOLD_BLIMP) ? 1 : 0;
+    if (inThreshold(L, A, B, THRESHOLD_BLIMP)) {
+      threshold_lut[px >> 3] |= (1 << (px & 7));
+    }
   }
+}
+
+static inline uint8_t getThresholdLUT(uint16_t px) {
+  return (threshold_lut[px >> 3] >> (px & 7)) & 0x01;
 }
 
 IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
@@ -142,10 +148,10 @@ IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
     int rx = 0;
     // Process 4 pixels per iteration using 32-bit packed writes
     for (; rx <= roi.w - 4; rx += 4) {
-      uint32_t m0 = threshold_lut[src[rx]];
-      uint32_t m1 = threshold_lut[src[rx + 1]];
-      uint32_t m2 = threshold_lut[src[rx + 2]];
-      uint32_t m3 = threshold_lut[src[rx + 3]];
+      uint32_t m0 = getThresholdLUT(src[rx]);
+      uint32_t m1 = getThresholdLUT(src[rx + 1]);
+      uint32_t m2 = getThresholdLUT(src[rx + 2]);
+      uint32_t m3 = getThresholdLUT(src[rx + 3]);
 
       // Pack 4 mask bytes into a single uint32_t store
       *(uint32_t *)&dst[rx] = m0 | (m1 << 8) | (m2 << 16) | (m3 << 24);
@@ -153,7 +159,7 @@ IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
 
     // Process remaining pixels
     for (; rx < roi.w; rx++) {
-      dst[rx] = threshold_lut[src[rx]];
+      dst[rx] = getThresholdLUT(src[rx]);
     }
   }
 }
@@ -167,8 +173,8 @@ void applyColorMaskFast(camera_fb_t *fb) {
     uint16_t px0 = src16[i * 2];
     uint16_t px1 = src16[i * 2 + 1];
 
-    uint32_t mask0 = threshold_lut[px0] ? 0x0000FFFF : 0x00000000;
-    uint32_t mask1 = threshold_lut[px1] ? 0xFFFF0000 : 0x00000000;
+    uint32_t mask0 = getThresholdLUT(px0) ? 0x0000FFFF : 0x00000000;
+    uint32_t mask1 = getThresholdLUT(px1) ? 0xFFFF0000 : 0x00000000;
 
     dst32[i] = mask0 | mask1;
   }
@@ -453,10 +459,7 @@ void setup() {
   // Internal SRAM Allocation (16 KB stack buffer)
   stack_buf = (uint32_t *)heap_caps_malloc(MAX_STACK_SIZE * sizeof(uint32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-  // PSRAM Allocation (153.6 KB RGB565 work buffer)
-  rgb_work_buf = (uint8_t *)heap_caps_malloc(total_pixels * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-
-  if (!mask_buf || !stack_buf || !rgb_work_buf) {
+  if (!mask_buf || !stack_buf) {
     errorLoop();
   }
 
