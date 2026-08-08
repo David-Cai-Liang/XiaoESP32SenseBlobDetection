@@ -1,5 +1,5 @@
 #define DEBUG_STREAM 0
-#define MASKED_DEBUG_STREAM 1
+#define MASKED_DEBUG_STREAM 0
 
 #include <stdio.h>
 #include <string.h>
@@ -142,30 +142,56 @@ static inline uint8_t getThresholdLUT(uint16_t px) {
   return (threshold_lut[px >> 3] >> (px & 7)) & 0x01;
 }
 
+static inline bool getMaskBit(int idx) {
+  return (mask_buf[idx >> 3] >> (idx & 7)) & 1;
+}
+
+static inline void clearMaskBit(int idx) {
+  mask_buf[idx >> 3] &= ~(1 << (idx & 7));
+}
+
+static inline void setMaskBit(int idx) {
+  mask_buf[idx >> 3] |= (1 << (idx & 7));
+}
+
 IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
   const uint16_t *buf = (const uint16_t *)fb->buf;
   int stride = fb->width;
 
   for (int ry = 0; ry < roi.h; ry++) {
-    int row_offset = (roi.y + ry) * stride + roi.x;
-    const uint16_t *src = &buf[row_offset];
-    uint8_t *dst = &mask_buf[row_offset];
-
+    int row_pixel_offset = (roi.y + ry) * stride + roi.x;
+    const uint16_t *src = &buf[row_pixel_offset];
     int rx = 0;
-    // Process 4 pixels per iteration using 32-bit packed writes
-    for (; rx <= roi.w - 4; rx += 4) {
-      uint32_t m0 = getThresholdLUT(src[rx]);
-      uint32_t m1 = getThresholdLUT(src[rx + 1]);
-      uint32_t m2 = getThresholdLUT(src[rx + 2]);
-      uint32_t m3 = getThresholdLUT(src[rx + 3]);
 
-      // Pack 4 mask bytes into a single uint32_t store
-      *(uint32_t *)&dst[rx] = m0 | (m1 << 8) | (m2 << 16) | (m3 << 24);
+    // 1. Unaligned head pixels (until row_pixel_offset + rx is 8-bit aligned)
+    while (rx < roi.w && ((row_pixel_offset + rx) & 7) != 0) {
+      int bit_offset = row_pixel_offset + rx;
+      if (getThresholdLUT(src[rx])) setMaskBit(bit_offset);
+      else clearMaskBit(bit_offset);
+      rx++;
     }
 
-    // Process remaining pixels
+    // 2. Fast 8-pixel block writes (pack 8 threshold bits into 1 byte write)
+    for (; rx <= roi.w - 8; rx += 8) {
+      uint8_t b = 0;
+      b |= (getThresholdLUT(src[rx + 0]) << 0);
+      b |= (getThresholdLUT(src[rx + 1]) << 1);
+      b |= (getThresholdLUT(src[rx + 2]) << 2);
+      b |= (getThresholdLUT(src[rx + 3]) << 3);
+      b |= (getThresholdLUT(src[rx + 4]) << 4);
+      b |= (getThresholdLUT(src[rx + 5]) << 5);
+      b |= (getThresholdLUT(src[rx + 6]) << 6);
+      b |= (getThresholdLUT(src[rx + 7]) << 7);
+
+      int bit_offset = row_pixel_offset + rx;
+      mask_buf[bit_offset >> 3] = b; // Store 8 compressed mask bits in 1 write
+    }
+
+    // 3. Unaligned tail pixels
     for (; rx < roi.w; rx++) {
-      dst[rx] = getThresholdLUT(src[rx]);
+      int bit_offset = row_pixel_offset + rx;
+      if (getThresholdLUT(src[rx])) setMaskBit(bit_offset);
+      else clearMaskBit(bit_offset);
     }
   }
 }
@@ -185,7 +211,6 @@ void applyColorMaskFast(camera_fb_t *fb) {
     dst32[i] = mask0 | mask1;
   }
 }
-
 IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
   int stride = fb->width;
   int rw = roi.w, rh = roi.h;
@@ -202,7 +227,13 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
       int img_x = roi.x + rx;
       int idx = row_idx + img_x;
 
-      if (mask_buf[idx] != 1) continue;
+      // --- OPTIMIZATION 1: Fast skip 8 empty pixels at once ---
+      if ((idx & 7) == 0 && rx <= rw - 8 && mask_buf[idx >> 3] == 0x00) {
+        rx += 7; // Skip entire zero byte (loop increment makes it +8)
+        continue;
+      }
+
+      if (!getMaskBit(idx)) continue;
 
       int stack_size = 0;
       stack_buf[stack_size++] = ((uint32_t)ry << 16) | (uint16_t)rx;
@@ -218,26 +249,56 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
         int seed_y = pos >> 16;
 
         int row_offset = (roi.y + seed_y) * stride + roi.x;
-        if (mask_buf[row_offset + seed_x] != 1) continue;
+        int seed_idx = row_offset + seed_x;
+        if (!getMaskBit(seed_idx)) continue;
 
         // Scan left boundary
         int lx = seed_x;
-        while (lx > 0 && mask_buf[row_offset + lx - 1] == 1) {
-          lx--;
+        while (lx > 0) {
+          int test_idx = row_offset + lx - 1;
+          // Fast check: 8 solid pixels to the left
+          if ((test_idx & 7) == 7 && lx >= 8 && mask_buf[(test_idx - 7) >> 3] == 0xFF) {
+            lx -= 8;
+          } else if (getMaskBit(test_idx)) {
+            lx--;
+          } else {
+            break;
+          }
         }
 
         // Scan right boundary
         int rx_span = seed_x;
-        while (rx_span < rw - 1 && mask_buf[row_offset + rx_span + 1] == 1) {
-          rx_span++;
+        while (rx_span < rw - 1) {
+          int test_idx = row_offset + rx_span + 1;
+          // Fast check: 8 solid pixels to the right
+          if ((test_idx & 7) == 0 && rx_span <= rw - 9 && mask_buf[test_idx >> 3] == 0xFF) {
+            rx_span += 8;
+          } else if (getMaskBit(test_idx)) {
+            rx_span++;
+          } else {
+            break;
+          }
         }
 
         // Process horizontal span & clear mask
         for (int x = lx; x <= rx_span; x++) {
-          mask_buf[row_offset + x] = 0;
-          count++;
-          sumX += x;
-          sumY += seed_y;
+          int bit_idx = row_offset + x;
+
+          // --- OPTIMIZATION 2: Fast clear 8 solid pixels at once ---
+          if ((bit_idx & 7) == 0 && x + 7 <= rx_span && mask_buf[bit_idx >> 3] == 0xFF) {
+            mask_buf[bit_idx >> 3] = 0x00; // Clear all 8 pixels instantly
+            count += 8;
+            sumX += (x * 8 + 28); // Arithmetic sum of (x + x+1 + ... + x+7)
+            sumY += seed_y * 8;
+            x += 7; // Loop increment will advance to x + 8
+          } else {
+            if (getMaskBit(bit_idx)) {
+              clearMaskBit(bit_idx);
+              count++;
+              sumX += x;
+              sumY += seed_y;
+            }
+          }
         }
 
         if (lx < minX) minX = lx;
@@ -255,7 +316,16 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
           bool in_span = false;
 
           for (int x = lx; x <= rx_span; x++) {
-            if (mask_buf[n_row_offset + x] == 1) {
+            int n_idx = n_row_offset + x;
+
+            // Fast skip if entire 8-pixel block on adjacent line is empty (0x00)
+            if ((n_idx & 7) == 0 && x + 7 <= rx_span && mask_buf[n_idx >> 3] == 0x00) {
+              in_span = false;
+              x += 7;
+              continue;
+            }
+
+            if (getMaskBit(n_idx)) {
               if (!in_span) {
                 if (stack_size < MAX_STACK_SIZE) {
                   stack_buf[stack_size++] = ((uint32_t)ny << 16) | (uint16_t)x;
@@ -489,7 +559,7 @@ extern "C" void app_main(void) {
   size_t total_pixels = MAX_W * MAX_H;
 
   // Internal SRAM (76.8 KB)
-  mask_buf = (uint8_t *)heap_caps_malloc(total_pixels, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  mask_buf = (uint8_t *)heap_caps_malloc((total_pixels + 7) / 8, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
   // Internal SRAM (16 KB)
   stack_buf = (uint32_t *)heap_caps_malloc(MAX_STACK_SIZE * sizeof(uint32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
