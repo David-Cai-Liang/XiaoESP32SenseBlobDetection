@@ -53,8 +53,8 @@ struct LabThreshold {
 
 static const LabThreshold THRESHOLD_BLIMP = {20, 60, 10, 50, 1, 30};
 
-static const uint32_t AREA_THRESHOLD_LOCKED = 20;
-static const uint32_t AREA_THRESHOLD_SEARCH = 40;
+static const uint32_t AREA_THRESHOLD_LOCKED = 30;
+static const uint32_t AREA_THRESHOLD_SEARCH = 60;
 static const int ROI_PADDING = 30;
 static const int SCAN_STEP = 1;
 
