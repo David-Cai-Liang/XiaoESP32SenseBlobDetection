@@ -190,6 +190,7 @@ IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
   }
 }
 
+#if MASKED_DEBUG_STREAM
 void applyColorMaskFast(camera_fb_t *fb) {
   const uint16_t *src16 = (const uint16_t *)fb->buf;
   uint32_t *dst32 = (uint32_t *)fb->buf;
@@ -205,6 +206,8 @@ void applyColorMaskFast(camera_fb_t *fb) {
     dst32[i] = mask0 | mask1;
   }
 }
+#endif
+
 IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshold) {
   int stride = fb->width;
   int rw = roi.w, rh = roi.h;
@@ -478,6 +481,7 @@ TelemetryData buildTelemetry(const Blob &largest) {
   return telem;
 }
 
+#if DEBUG_STREAM
 void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool locked, const TelemetryData &telem) {
   #if MASKED_DEBUG_STREAM
     applyColorMaskFast(work_fb); // Uncomment to output binary vision mask
@@ -501,7 +505,7 @@ void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool l
     free(jpg_buf);
   }
 }
-
+#else
 void sendTelemetry(const TelemetryData &telem) {
   FrameHeader header;
   header.magic[0] = 0xFF; header.magic[1] = 0xAA;
@@ -511,6 +515,7 @@ void sendTelemetry(const TelemetryData &telem) {
 
   Serial.write((uint8_t *)&header, sizeof(header));
 }
+#endif
 
 void setup() {
   pinMode(LED_GPIO_NUM, OUTPUT);

@@ -17,6 +17,9 @@
 
 #include "esp_vfs_usb_serial_jtag.h"
 
+#include <mpu6050.h>
+#include <i2cdev.h>
+
 static const char *TAG = "MAIN";
 
 // --- Hardware Pins ---
@@ -44,6 +47,12 @@ static const char *TAG = "MAIN";
 #define MAX_H 240
 #define MAX_STACK_SIZE 8192 // 4096 entries (32 KB in SRAM) for Scanline Flood Fill
 
+//IMU PINS
+#define PIN_SDA GPIO_NUM_5
+#define PIN_SCL GPIO_NUM_6
+#define MPU_ADDR 0x68
+//
+
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
@@ -58,14 +67,15 @@ static const uint32_t AREA_THRESHOLD_SEARCH = 60;
 static const int ROI_PADDING = 30;
 static const int SCAN_STEP = 1;
 
+mpu6050_dev_t dev;
+
 struct Rect { int x, y, w, h; };
 struct Blob { int x, y, w, h, cx, cy; uint32_t pixels; };
 
 typedef struct __attribute__((packed)) {
   uint16_t hb;
-  uint16_t roi_x, roi_y, roi_w, roi_h;
   uint16_t cx, cy, w, h;
-  uint16_t max_w, max_h;
+  float ax, ay, az, tz;
 } TelemetryData;
 
 typedef struct __attribute__((packed)) {
@@ -459,8 +469,16 @@ FrameResult processFrame() {
 }
 
 TelemetryData buildTelemetry(const Blob &largest) {
-  TelemetryData telem;
+  TelemetryData telem = {};
 
+  // Fetch IMU motion data regardless of target detection
+  mpu6050_acceleration_t accel = {};
+  mpu6050_rotation_t rotation = {};
+  float temp = 0.0f;
+
+  ESP_ERROR_CHECK(mpu6050_get_temperature(&dev, &temp));
+  ESP_ERROR_CHECK(mpu6050_get_motion(&dev, &accel, &rotation));
+  //
   if (largest.pixels > 0) {
     heartbeat = esp_log_timestamp();
 
@@ -472,17 +490,28 @@ TelemetryData buildTelemetry(const Blob &largest) {
     tracking_roi = {roi_x, roi_y, roi_w, roi_h};
     target_locked = true;
 
-    telem = {
-      heartbeat,
-      (uint16_t)roi_x, (uint16_t)roi_y, (uint16_t)roi_w, (uint16_t)roi_h,
-      (uint16_t)largest.cx, (uint16_t)largest.cy, (uint16_t)largest.w, (uint16_t)largest.h,
-      (uint16_t)MAX_W, (uint16_t)MAX_H
-    };
+    telem.hb = heartbeat;
+    telem.cx = (uint16_t)roi_x;
+    telem.cy = (uint16_t)roi_y;
+    telem.w  = (uint16_t)roi_w;
+    telem.h  = (uint16_t)roi_h;
   } else {
     target_locked = false;
     tracking_roi = {0, 0, MAX_W, MAX_H};
-    telem = {0, 0, 0, 0, 0, 0, 0, 0, 0, (uint16_t)MAX_W, (uint16_t)MAX_H};
+
+    telem.hb = 0;
+    telem.cx = 0;
+    telem.cy = 0;
+    telem.w  = 0;
+    telem.h  = 0;
   }
+
+  // Populate IMU fields
+  telem.ax = accel.x;
+  telem.ay = accel.y;
+  telem.az = accel.z;
+  telem.tz = rotation.x;
+  //
   return telem;
 }
 
@@ -551,12 +580,32 @@ void processingTask(void *pvParameters) {
 extern "C" void app_main(void) {
   esp_vfs_dev_usb_serial_jtag_set_tx_line_endings(ESP_LINE_ENDINGS_LF);
   esp_vfs_dev_usb_serial_jtag_set_rx_line_endings(ESP_LINE_ENDINGS_LF);
+  setvbuf(stdout, NULL, _IONBF, 0);
 
   gpio_reset_pin(LED_GPIO_NUM);
   gpio_set_direction(LED_GPIO_NUM, GPIO_MODE_OUTPUT);
   gpio_set_level(LED_GPIO_NUM, 0); // Solid ON during boot
 
-  setvbuf(stdout, NULL, _IONBF, 0);
+  // Initialize IMU
+  ESP_ERROR_CHECK(i2cdev_init());
+  dev.i2c_dev.cfg.master.clk_speed = 100000;
+  dev = {};
+  ESP_ERROR_CHECK(mpu6050_init_desc(&dev, MPU_ADDR, 0, PIN_SDA, PIN_SCL));
+  dev.i2c_dev.cfg.sda_pullup_en = GPIO_PULLUP_ENABLE;
+  dev.i2c_dev.cfg.scl_pullup_en = GPIO_PULLUP_ENABLE;
+  ESP_LOGI(TAG, "Probing MPU6050 on SDA=GPIO%d, SCL=GPIO%d, Address=0x%02x...", PIN_SDA, PIN_SCL, MPU_ADDR);
+  while (1) {
+      esp_err_t res = i2c_dev_probe(&dev.i2c_dev, I2C_DEV_WRITE);
+      if (res == ESP_OK) {
+          ESP_LOGI(TAG, "SUCCESS: Found MPU60x0 device!");
+          break;
+      }
+      ESP_LOGE(TAG, "MPU60x0 not found (error 0x%x)", res);
+      vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+  ESP_ERROR_CHECK(mpu6050_init(&dev));
+  //
+
   vTaskDelay(pdMS_TO_TICKS(500));
 
   setupCamera();
