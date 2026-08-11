@@ -1,31 +1,45 @@
+/* ============================================================================
+ * Includes & Configuration
+ * ============================================================================ */
+
 #define DEBUG_STREAM 0
 #define MASKED_DEBUG_STREAM 1
 
+// Standard C Libraries
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 
+// FreeRTOS
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+
+// ESP32 Drivers & System Headers
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "driver/gpio.h"
+#include "esp_vfs_usb_serial_jtag.h"
 
+// Camera & Image Utilities
 #include "esp_camera.h"
 #include "img_converters.h"
 
-#include "esp_vfs_usb_serial_jtag.h"
-
+// External Sensor Drivers
 #include <mpu6050.h>
 #include <i2cdev.h>
 
+/* ============================================================================
+ * Hardware Pin Definitions & Constants
+ * ============================================================================ */
+
 static const char *TAG = "MAIN";
 
-// --- Hardware Pins ---
-#define LED_GPIO_NUM   (gpio_num_t)21 // XIAO ESP32S3 User LED (Active LOW)
+// Hardware LED (Active LOW)
+#define LED_GPIO_NUM   (gpio_num_t)21
 
+// ESP32 Camera Pin Configuration (XIAO ESP32S3 / OV2640 Pinout)
 #define PWDN_GPIO_NUM  -1
 #define RESET_GPIO_NUM -1
 #define XCLK_GPIO_NUM  10
@@ -44,35 +58,50 @@ static const char *TAG = "MAIN";
 #define HREF_GPIO_NUM  47
 #define PCLK_GPIO_NUM  13
 
-#define MAX_W 320
-#define MAX_H 240
-#define MAX_STACK_SIZE 8192 // 4096 entries (32 KB in SRAM) for Scanline Flood Fill
+// Camera Dimensions & Processing Buffer Bounds
+#define MAX_W          320
+#define MAX_H          240
+#define MAX_STACK_SIZE 8192 // 8192 entries (32 KB in SRAM) for Scanline Flood Fill
 
-// IMU PINS & INTERRUPT CONFIG
-#define PIN_SDA GPIO_NUM_5
-#define PIN_SCL GPIO_NUM_6
-#define PIN_INT GPIO_NUM_8  // Connect MPU6050 INT pin to GPIO 7
+// IMU Pins & Interrupt Config
+#define PIN_SDA  GPIO_NUM_5
+#define PIN_SCL  GPIO_NUM_6
+#define PIN_INT  GPIO_NUM_8  // MPU6050 INT pin
 #define MPU_ADDR 0x68
 
+// Helper Macros
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
+/* ============================================================================
+ * Data Structures
+ * ============================================================================ */
+
 struct LabThreshold {
-  int l_min, l_max, a_min, a_max, b_min, b_max;
+  int l_min, l_max;
+  int a_min, a_max;
+  int b_min, b_max;
 };
 
+struct Rect {
+  int x, y, w, h;
+};
+
+struct Blob {
+  int x, y, w, h;
+  int cx, cy;
+  uint32_t pixels;
+};
+
+// Target tracking color parameters
 static const LabThreshold THRESHOLD_BLIMP = {20, 60, 10, 50, 1, 30};
 
 static const uint32_t AREA_THRESHOLD_LOCKED = 30;
 static const uint32_t AREA_THRESHOLD_SEARCH = 60;
 static const int ROI_PADDING = 30;
-static const int SCAN_STEP = 1;
+static const int SCAN_STEP   = 1;
 
-mpu6050_dev_t dev;
-
-struct Rect { int x, y, w, h; };
-struct Blob { int x, y, w, h, cx, cy; uint32_t pixels; };
-
+// Binary Communication Protocol Types (Packed to preserve wire-format)
 typedef struct __attribute__((packed)) {
   uint16_t hb;
   uint16_t cx, cy, w, h;
@@ -80,12 +109,12 @@ typedef struct __attribute__((packed)) {
 } TelemetryData;
 
 typedef struct __attribute__((packed)) {
-  uint8_t magic[4];     // {0xFF, 0xAA, 0x55, 0xFF}
+  uint8_t magic[4];     // Handshake framing: {0xFF, 0xAA, 0x55, 0xFF}
   uint32_t payload_len;
   TelemetryData telem;
 } FrameHeader;
 
-// --- Thread-Safe Shared Data Structures ---
+// Cross-Core Thread-Safe Shared State
 typedef struct {
   Blob blob;
   Rect roi;
@@ -98,22 +127,32 @@ typedef struct {
   bool valid;
 } ImuData;
 
+/* ============================================================================
+ * Global / Static Variables
+ * ============================================================================ */
+
+static mpu6050_dev_t dev;
+
 static VisionState g_vision_state = {};
-static ImuData g_imu_data = {};
+static ImuData g_imu_data         = {};
 
-static SemaphoreHandle_t xVisionMutex = NULL;
-static SemaphoreHandle_t xImuMutex = NULL;
-static TaskHandle_t xImuTaskHandle = NULL; // Handle used by ISR for notification
+static SemaphoreHandle_t xVisionMutex   = NULL;
+static SemaphoreHandle_t xImuMutex      = NULL;
+static TaskHandle_t      xImuTaskHandle = NULL; // Handle used by ISR for notification
 
-static Rect tracking_roi = {0, 0, MAX_W, MAX_H};
-static bool target_locked = false;
-static uint16_t heartbeat = 1;
+static Rect tracking_roi    = {0, 0, MAX_W, MAX_H};
+static bool target_locked   = false;
+static uint16_t heartbeat   = 1;
 
-static uint8_t threshold_lut[8192];
-static uint8_t *mask_buf = NULL;     // Internal SRAM (76.8 KB)
-static uint32_t *stack_buf = NULL;   // Internal SRAM (16 KB)
+// Speed-optimized buffers in SRAM
+static uint8_t  threshold_lut[8192];
+static uint8_t *mask_buf  = NULL; // Internal SRAM (~76.8 KB)
+static uint32_t *stack_buf = NULL; // Internal SRAM (~16 KB)
 
-// --- Interrupt Service Routine (ISR) ---
+/* ============================================================================
+ * Interrupt Service Routines & Hardware Callbacks
+ * ============================================================================ */
+
 static void IRAM_ATTR mpu6050_isr_handler(void *arg) {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   if (xImuTaskHandle != NULL) {
@@ -121,6 +160,10 @@ static void IRAM_ATTR mpu6050_isr_handler(void *arg) {
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
   }
 }
+
+/* ============================================================================
+ * Color Space & Fast Bitwise Helper Functions
+ * ============================================================================ */
 
 static inline float srgbToLinear(float c) {
   return (c <= 0.04045f) ? (c / 12.92f) : powf((c + 0.055f) / 1.055f, 2.4f);
@@ -131,10 +174,30 @@ static inline float labF(float t) {
 }
 
 static inline bool inThreshold(int L, int A, int B, const LabThreshold &t) {
-  return L >= t.l_min && L <= t.l_max &&
-         A >= t.a_min && A <= t.a_max &&
-         B >= t.b_min && B <= t.b_max;
+  return (L >= t.l_min && L <= t.l_max &&
+          A >= t.a_min && A <= t.a_max &&
+          B >= t.b_min && B <= t.b_max);
 }
+
+static inline uint8_t getThresholdLUT(uint16_t px) {
+  return (threshold_lut[px >> 3] >> (px & 7)) & 0x01;
+}
+
+static inline bool getMaskBit(int idx) {
+  return (mask_buf[idx >> 3] >> (idx & 7)) & 1;
+}
+
+static inline void clearMaskBit(int idx) {
+  mask_buf[idx >> 3] &= ~(1 << (idx & 7));
+}
+
+static inline void setMaskBit(int idx) {
+  mask_buf[idx >> 3] |= (1 << (idx & 7));
+}
+
+/* ============================================================================
+ * Vision & Image Processing Engine
+ * ============================================================================ */
 
 void initThresholdLUT() {
   memset(threshold_lut, 0, sizeof(threshold_lut));
@@ -148,8 +211,8 @@ void initThresholdLUT() {
     uint16_t native_px = __builtin_bswap16((uint16_t)px);
 
     uint8_t r5 = (native_px >> 11) & 0x1F;
-    uint8_t g6 = (native_px >> 5) & 0x3F;
-    uint8_t b5 = native_px & 0x1F;
+    uint8_t g6 = (native_px >> 5)  & 0x3F;
+    uint8_t b5 =  native_px        & 0x1F;
 
     float r = r_lin[r5];
     float g = g_lin[g6];
@@ -171,22 +234,6 @@ void initThresholdLUT() {
   }
 }
 
-static inline uint8_t getThresholdLUT(uint16_t px) {
-  return (threshold_lut[px >> 3] >> (px & 7)) & 0x01;
-}
-
-static inline bool getMaskBit(int idx) {
-  return (mask_buf[idx >> 3] >> (idx & 7)) & 1;
-}
-
-static inline void clearMaskBit(int idx) {
-  mask_buf[idx >> 3] &= ~(1 << (idx & 7));
-}
-
-static inline void setMaskBit(int idx) {
-  mask_buf[idx >> 3] |= (1 << (idx & 7));
-}
-
 IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
   const uint16_t *buf = (const uint16_t *)fb->buf;
   int stride = fb->width;
@@ -196,6 +243,7 @@ IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
     const uint16_t *src = &buf[row_pixel_offset];
     int rx = 0;
 
+    // Align to byte boundary
     while (rx < roi.w && ((row_pixel_offset + rx) & 7) != 0) {
       int bit_offset = row_pixel_offset + rx;
       if (getThresholdLUT(src[rx])) setMaskBit(bit_offset);
@@ -203,6 +251,7 @@ IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
       rx++;
     }
 
+    // Process 8 pixels at a time
     for (; rx <= roi.w - 8; rx += 8) {
       uint8_t b = 0;
       b |= (getThresholdLUT(src[rx + 0]) << 0);
@@ -218,6 +267,7 @@ IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
       mask_buf[bit_offset >> 3] = b;
     }
 
+    // Process remaining trailing pixels
     for (; rx < roi.w; rx++) {
       int bit_offset = row_pixel_offset + rx;
       if (getThresholdLUT(src[rx])) setMaskBit(bit_offset);
@@ -229,8 +279,8 @@ IRAM_ATTR void generateSramMaskFast(const camera_fb_t *fb, Rect roi) {
 #if MASKED_DEBUG_STREAM
 void applyColorMaskFast(camera_fb_t *fb) {
   const uint16_t *src16 = (const uint16_t *)fb->buf;
-  uint32_t *dst32 = (uint32_t *)fb->buf;
-  size_t total_words = (fb->width * fb->height) / 2;
+  uint32_t *dst32       = (uint32_t *)fb->buf;
+  size_t total_words    = (fb->width * fb->height) / 2;
 
   for (size_t i = 0; i < total_words; i++) {
     uint16_t px0 = src16[i * 2];
@@ -253,13 +303,14 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
   Blob best = {0, 0, 0, 0, 0, 0, 0};
 
   for (int ry = 0; ry < rh; ry += SCAN_STEP) {
-    int img_y = roi.y + ry;
+    int img_y   = roi.y + ry;
     int row_idx = img_y * stride;
 
     for (int rx = 0; rx < rw; rx += SCAN_STEP) {
       int img_x = roi.x + rx;
-      int idx = row_idx + img_x;
+      int idx   = row_idx + img_x;
 
+      // Skip fully empty 8-bit mask chunks
       if ((idx & 7) == 0 && rx <= rw - 8 && mask_buf[idx >> 3] == 0x00) {
         rx += 7;
         continue;
@@ -274,15 +325,17 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
       uint32_t count = 0;
       int minX = rx, maxX = rx, minY = ry, maxY = ry;
 
+      // Scanline Flood Fill Algorithm
       while (stack_size > 0) {
         uint32_t pos = stack_buf[--stack_size];
-        int seed_x = pos & 0xFFFF;
-        int seed_y = pos >> 16;
+        int seed_x   = pos & 0xFFFF;
+        int seed_y   = pos >> 16;
 
         int row_offset = (roi.y + seed_y) * stride + roi.x;
-        int seed_idx = row_offset + seed_x;
+        int seed_idx   = row_offset + seed_x;
         if (!getMaskBit(seed_idx)) continue;
 
+        // Scan Left
         int lx = seed_x;
         while (lx > 0) {
           int test_idx = row_offset + lx - 1;
@@ -295,6 +348,7 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
           }
         }
 
+        // Scan Right
         int rx_span = seed_x;
         while (rx_span < rw - 1) {
           int test_idx = row_offset + rx_span + 1;
@@ -307,14 +361,15 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
           }
         }
 
+        // Fill span
         for (int x = lx; x <= rx_span; x++) {
           int bit_idx = row_offset + x;
 
           if ((bit_idx & 7) == 0 && x + 7 <= rx_span && mask_buf[bit_idx >> 3] == 0xFF) {
             mask_buf[bit_idx >> 3] = 0x00;
             count += 8;
-            sumX += (x * 8 + 28);
-            sumY += seed_y * 8;
+            sumX  += (x * 8 + 28);
+            sumY  += seed_y * 8;
             x += 7;
           } else {
             if (getMaskBit(bit_idx)) {
@@ -326,11 +381,12 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
           }
         }
 
-        if (lx < minX) minX = lx;
+        if (lx < minX)      minX = lx;
         if (rx_span > maxX) maxX = rx_span;
-        if (seed_y < minY) minY = seed_y;
-        if (seed_y > maxY) maxY = seed_y;
+        if (seed_y < minY)  minY = seed_y;
+        if (seed_y > maxY)  maxY = seed_y;
 
+        // Check Adjacent Rows (Up and Down)
         const int dys[2] = {-1, 1};
         for (int i = 0; i < 2; i++) {
           int ny = seed_y + dys[i];
@@ -362,12 +418,13 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
         }
       }
 
+      // Track largest blob found
       if (count >= area_threshold && count > best.pixels) {
         best.pixels = count;
-        best.x = roi.x + minX;
-        best.y = roi.y + minY;
-        best.w = maxX - minX + 1;
-        best.h = maxY - minY + 1;
+        best.x  = roi.x + minX;
+        best.y  = roi.y + minY;
+        best.w  = maxX - minX + 1;
+        best.h  = maxY - minY + 1;
         best.cx = roi.x + (int)(sumX / count);
         best.cy = roi.y + (int)(sumY / count);
       }
@@ -377,7 +434,7 @@ IRAM_ATTR Blob findLargestBlob(camera_fb_t *fb, Rect roi, uint32_t area_threshol
 }
 
 static inline bool inBounds(int x, int y) {
-  return x >= 0 && x < MAX_W && y >= 0 && y < MAX_H;
+  return (x >= 0 && x < MAX_W && y >= 0 && y < MAX_H);
 }
 
 void drawOverlays(camera_fb_t *fb, Rect roi, Blob blob, bool locked) {
@@ -387,33 +444,39 @@ void drawOverlays(camera_fb_t *fb, Rect roi, Blob blob, bool locked) {
   uint16_t COLOR_ROI  = locked ? 0xE007 : 0xE0FF;
   uint16_t COLOR_BLOB = 0x00F8;
 
+  // Draw ROI Box
   for (int t = 0; t < 2; t++) {
     for (int x = roi.x - t; x < roi.x + roi.w + t; x++) {
-      if (inBounds(x, roi.y - 1 - t)) buf[(roi.y - 1 - t) * stride + x] = COLOR_ROI;
+      if (inBounds(x, roi.y - 1 - t))     buf[(roi.y - 1 - t) * stride + x] = COLOR_ROI;
       if (inBounds(x, roi.y + roi.h + t)) buf[(roi.y + roi.h + t) * stride + x] = COLOR_ROI;
     }
     for (int y = roi.y - t; y < roi.y + roi.h + t; y++) {
-      if (inBounds(roi.x - 1 - t, y)) buf[y * stride + (roi.x - 1 - t)] = COLOR_ROI;
+      if (inBounds(roi.x - 1 - t, y))     buf[y * stride + (roi.x - 1 - t)] = COLOR_ROI;
       if (inBounds(roi.x + roi.w + t, y)) buf[y * stride + (roi.x + roi.w + t)] = COLOR_ROI;
     }
   }
 
+  // Draw Blob Bounding Box and Center Crosshair
   if (blob.pixels > 0) {
     for (int x = blob.x; x < blob.x + blob.w; x++) {
-      if (inBounds(x, blob.y)) buf[blob.y * stride + x] = COLOR_BLOB;
+      if (inBounds(x, blob.y))              buf[blob.y * stride + x] = COLOR_BLOB;
       if (inBounds(x, blob.y + blob.h - 1)) buf[(blob.y + blob.h - 1) * stride + x] = COLOR_BLOB;
     }
     for (int y = blob.y; y < blob.y + blob.h; y++) {
-      if (inBounds(blob.x, y)) buf[y * stride + blob.x] = COLOR_BLOB;
+      if (inBounds(blob.x, y))              buf[y * stride + blob.x] = COLOR_BLOB;
       if (inBounds(blob.x + blob.w - 1, y)) buf[y * stride + (blob.x + blob.w - 1)] = COLOR_BLOB;
     }
 
     for (int d = -4; d <= 4; d++) {
-      if (inBounds(blob.cx + d, blob.cy)) buf[blob.cy * stride + (blob.cx + d)] = COLOR_BLOB;
-      if (inBounds(blob.cx, blob.cy + d)) buf[(blob.cy + d) * stride + blob.cx] = COLOR_BLOB;
+      if (inBounds(blob.cx + d, blob.cy))   buf[blob.cy * stride + (blob.cx + d)] = COLOR_BLOB;
+      if (inBounds(blob.cx, blob.cy + d))   buf[(blob.cy + d) * stride + blob.cx] = COLOR_BLOB;
     }
   }
 }
+
+/* ============================================================================
+ * System Initialization & Driver Setup
+ * ============================================================================ */
 
 void errorLoop() {
   while (true) {
@@ -427,29 +490,29 @@ void errorLoop() {
 void setupCamera() {
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
+  config.ledc_timer   = LEDC_TIMER_0;
+  config.pin_d0       = Y2_GPIO_NUM;
+  config.pin_d1       = Y3_GPIO_NUM;
+  config.pin_d2       = Y4_GPIO_NUM;
+  config.pin_d3       = Y5_GPIO_NUM;
+  config.pin_d4       = Y6_GPIO_NUM;
+  config.pin_d5       = Y7_GPIO_NUM;
+  config.pin_d6       = Y8_GPIO_NUM;
+  config.pin_d7       = Y9_GPIO_NUM;
+  config.pin_xclk     = XCLK_GPIO_NUM;
+  config.pin_pclk     = PCLK_GPIO_NUM;
+  config.pin_vsync    = VSYNC_GPIO_NUM;
+  config.pin_href     = HREF_GPIO_NUM;
   config.pin_sccb_sda = SIOD_GPIO_NUM;
   config.pin_sccb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
+  config.pin_pwdn     = PWDN_GPIO_NUM;
+  config.pin_reset    = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_QVGA;
+  config.frame_size   = FRAMESIZE_QVGA;
   config.pixel_format = PIXFORMAT_RGB565;
-  config.grab_mode = CAMERA_GRAB_LATEST;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.fb_count = 2;
+  config.grab_mode    = CAMERA_GRAB_LATEST;
+  config.fb_location  = CAMERA_FB_IN_PSRAM;
+  config.fb_count     = 2;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -457,6 +520,10 @@ void setupCamera() {
     errorLoop();
   }
 }
+
+/* ============================================================================
+ * Telemetry & Debug Output Functions
+ * ============================================================================ */
 
 #if DEBUG_STREAM
 void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool locked, const TelemetryData &telem) {
@@ -466,15 +533,17 @@ void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool l
   drawOverlays(work_fb, roi, blob, locked);
 
   uint8_t *jpg_buf = NULL;
-  size_t jpg_len = 0;
-  bool converted = fmt2jpg(work_fb->buf, work_fb->len, MAX_W, MAX_H, PIXFORMAT_RGB565, 20, &jpg_buf, &jpg_len);
+  size_t jpg_len   = 0;
+  bool converted   = fmt2jpg(work_fb->buf, work_fb->len, MAX_W, MAX_H, PIXFORMAT_RGB565, 20, &jpg_buf, &jpg_len);
 
   if (converted) {
     FrameHeader header;
-    header.magic[0] = 0xFF; header.magic[1] = 0xAA;
-    header.magic[2] = 0x55; header.magic[3] = 0xFF;
+    header.magic[0] = 0xFF;
+    header.magic[1] = 0xAA;
+    header.magic[2] = 0x55;
+    header.magic[3] = 0xFF;
     header.payload_len = jpg_len;
-    header.telem = telem;
+    header.telem       = telem;
 
     fwrite((const void *)&header, 1, sizeof(header), stdout);
     fwrite((const void *)jpg_buf, 1, jpg_len, stdout);
@@ -484,7 +553,7 @@ void streamDebug(camera_fb_t *work_fb, const Blob &blob, const Rect &roi, bool l
   }
 }
 #else
-static void sendTelemetry(const TelemetryData &telem){
+static void sendTelemetry(const TelemetryData &telem) {
   FrameHeader header;
 
   header.magic[0] = 0xFF;
@@ -493,14 +562,20 @@ static void sendTelemetry(const TelemetryData &telem){
   header.magic[3] = 0xFF;
 
   header.payload_len = 0;
-  header.telem = telem;
+  header.telem       = telem;
 
   fwrite(&header, 1, sizeof(header), stdout);
   fflush(stdout);
 }
 #endif
 
-// ======================= CORE 1: VISION TASK =======================
+/* ============================================================================
+ * Core Tasks
+ * ============================================================================ */
+
+// ----------------------------------------------------------------------------
+// CORE 1: Vision Processing Task
+// ----------------------------------------------------------------------------
 void visionTask(void *pvParameters) {
   while (1) {
     camera_fb_t *fb = esp_camera_fb_get();
@@ -529,13 +604,13 @@ void visionTask(void *pvParameters) {
       target_locked = true;
     } else {
       target_locked = false;
-      tracking_roi = {0, 0, MAX_W, MAX_H};
+      tracking_roi  = {0, 0, MAX_W, MAX_H};
     }
 
     if (xSemaphoreTake(xVisionMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
-      g_vision_state.blob = blob;
-      g_vision_state.roi = tracking_roi;
-      g_vision_state.locked = target_locked;
+      g_vision_state.blob      = blob;
+      g_vision_state.roi       = tracking_roi;
+      g_vision_state.locked    = target_locked;
       g_vision_state.heartbeat = heartbeat;
       xSemaphoreGive(xVisionMutex);
     }
@@ -568,23 +643,25 @@ void visionTask(void *pvParameters) {
   }
 }
 
-// ==================== CORE 0: INTERRUPT-DRIVEN IMU TASK ====================
+// ----------------------------------------------------------------------------
+// CORE 0: Interrupt-Driven IMU Telemetry Task
+// ----------------------------------------------------------------------------
 void imuTelemetryTask(void *pvParameters) {
   while (1) {
     // Block indefinitely until notified by the MPU6050 interrupt ISR
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     mpu6050_acceleration_t accel = {};
-    mpu6050_rotation_t rotation = {};
+    mpu6050_rotation_t rotation  = {};
     float temp = 0.0f;
 
     mpu6050_get_temperature(&dev, &temp);
     if (mpu6050_get_motion(&dev, &accel, &rotation) == ESP_OK) {
       if (xSemaphoreTake(xImuMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
-        g_imu_data.ax = accel.x;
-        g_imu_data.ay = accel.y;
-        g_imu_data.az = accel.z;
-        g_imu_data.tz = rotation.x;
+        g_imu_data.ax    = accel.x;
+        g_imu_data.ay    = accel.y;
+        g_imu_data.az    = accel.z;
+        g_imu_data.tz    = rotation.x;
         g_imu_data.valid = true;
         xSemaphoreGive(xImuMutex);
       }
@@ -616,16 +693,22 @@ void imuTelemetryTask(void *pvParameters) {
   }
 }
 
+/* ============================================================================
+ * Main Application Entry Point
+ * ============================================================================ */
+
 extern "C" void app_main(void) {
+  // --- Configure Serial Terminal ---
   esp_vfs_dev_usb_serial_jtag_set_tx_line_endings(ESP_LINE_ENDINGS_LF);
   esp_vfs_dev_usb_serial_jtag_set_rx_line_endings(ESP_LINE_ENDINGS_LF);
   setvbuf(stdout, NULL, _IONBF, 0);
 
+  // --- Hardware LED GPIO Setup ---
   gpio_reset_pin(LED_GPIO_NUM);
   gpio_set_direction(LED_GPIO_NUM, GPIO_MODE_OUTPUT);
   gpio_set_level(LED_GPIO_NUM, 0);
 
-  // --- Initialize IMU ---
+  // --- Initialize IMU (MPU6050) ---
   ESP_ERROR_CHECK(i2cdev_init());
   dev = {};
   ESP_ERROR_CHECK(mpu6050_init_desc(&dev, MPU_ADDR, 0, PIN_SDA, PIN_SCL));
@@ -634,34 +717,33 @@ extern "C" void app_main(void) {
   ESP_LOGI(TAG, "Probing MPU6050 on SDA=GPIO%d, SCL=GPIO%d, Address=0x%02x...", PIN_SDA, PIN_SCL, MPU_ADDR);
 
   while (1) {
-      esp_err_t res = i2c_dev_probe(&dev.i2c_dev, I2C_DEV_WRITE);
-      if (res == ESP_OK) {
-          ESP_LOGI(TAG, "SUCCESS: Found MPU60x0 device!");
-          break;
-      }
-      ESP_LOGE(TAG, "MPU60x0 not found (error 0x%x)", res);
-      vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_err_t res = i2c_dev_probe(&dev.i2c_dev, I2C_DEV_WRITE);
+    if (res == ESP_OK) {
+      ESP_LOGI(TAG, "SUCCESS: Found MPU60x0 device!");
+      break;
+    }
+    ESP_LOGE(TAG, "MPU60x0 not found (error 0x%x)", res);
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
   ESP_ERROR_CHECK(mpu6050_init(&dev));
-
   mpu6050_set_int_enabled(&dev, true);
 
-  // --- ESP32 Interrupt GPIO Configuration ---
+  // --- Configure Interrupt Pin for MPU6050 ---
   gpio_config_t io_conf = {};
-  io_conf.intr_type = GPIO_INTR_POSEDGE; // Trigger interrupt on rising edge
-  io_conf.mode = GPIO_MODE_INPUT;
+  io_conf.intr_type    = GPIO_INTR_POSEDGE; // Trigger on rising edge
+  io_conf.mode         = GPIO_MODE_INPUT;
   io_conf.pin_bit_mask = (1ULL << PIN_INT);
   io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+  io_conf.pull_up_en   = GPIO_PULLUP_ENABLE;
   gpio_config(&io_conf);
 
   vTaskDelay(pdMS_TO_TICKS(500));
 
+  // --- Camera & Vision Setup ---
   setupCamera();
 
   size_t total_pixels = MAX_W * MAX_H;
-
-  mask_buf = (uint8_t *)heap_caps_malloc((total_pixels + 7) / 8, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  mask_buf  = (uint8_t *)heap_caps_malloc((total_pixels + 7) / 8, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   stack_buf = (uint32_t *)heap_caps_malloc(MAX_STACK_SIZE * sizeof(uint32_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
   if (!mask_buf || !stack_buf) {
@@ -671,16 +753,18 @@ extern "C" void app_main(void) {
 
   initThresholdLUT();
 
+  // Mute redundant system logs
   esp_log_level_set("*", ESP_LOG_NONE);
 
-  // Create Mutexes for double-buffered cross-core state sharing
+  // --- Synchronizations & Inter-Task Communication ---
   xVisionMutex = xSemaphoreCreateMutex();
   xImuMutex    = xSemaphoreCreateMutex();
 
-  // Install GPIO Interrupt Handler Service and attach MPU6050 INT handler
+  // Attach Interrupt Handlers
   gpio_install_isr_service(0);
   gpio_isr_handler_add(PIN_INT, mpu6050_isr_handler, NULL);
 
+  // --- Task Creation ---
   // Core 0: Interrupt-driven IMU sampling & telemetry generator
   xTaskCreatePinnedToCore(imuTelemetryTask, "imu_telem_task", 8192, NULL, 5, &xImuTaskHandle, 0);
 
