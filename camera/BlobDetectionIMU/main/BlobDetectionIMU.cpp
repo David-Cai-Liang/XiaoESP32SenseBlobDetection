@@ -1,5 +1,5 @@
-#define DEBUG_STREAM 1
-#define MASKED_DEBUG_STREAM 1
+#define DEBUG_STREAM 0
+#define MASKED_DEBUG_STREAM 0
 
 // --- Standard Includes ---
 #include <stdio.h>
