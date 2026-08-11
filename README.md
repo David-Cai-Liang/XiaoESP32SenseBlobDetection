@@ -1,4 +1,3 @@
-
 ## Blob Detection — Xiao ESP32-S3 Sense
 
 Color-blob (LAB thresholded) target detector and tracker running on-device, streaming
@@ -13,24 +12,37 @@ telemetry (and optionally annotated JPEG video) over USB.
 - PSRAM is **required** — the camera frame buffer lives in PSRAM; everything else
   (mask buffer, flood-fill stack, threshold LUT) lives in internal SRAM. See
   [Memory layout](#memory-layout) below.
+- IMU (`future/` builds only): MPU-6050 6-axis IMU (accelerometer + gyro), the same
+  IMU used on the [ESP-FLY](https://www.seeedstudio.com/ESP-FLY-DIY-Drone-Kit-p-6408.html)
+  IMU / Motor Driver module. `future/` reads the MPU-6050 over I2C directly — it does
+  not use the ESP-FLY board's motor drivers, and there's no dependency on the rest of
+  the ESP-FLY firmware/hardware stack. See [IMU implementations](#imu-implementations-future)
+  below.
+
 ---
 
 ### Repository layout
 
 | Path | What it is |
 |---|---|
-| `BlobDetectionESP-IDF/` | Primary implementation, built with ESP-IDF |
-| `BlobDetectionArduinoIDE/` | Arduino IDE port of the same detection algorithm — see [ESP-IDF vs Arduino IDE](#esp-idf-vs-arduino-ide-important-differences) before assuming these behave identically |
-| `BlobDetectionCalibrate.ino` / `BlobDetectionCalibrate.py` | Interactive LAB threshold calibration tool |
-| `ViewDetections.py` | Live viewer for telemetry + (optionally) annotated video stream |
+| `current/BlobDetectionESP-IDF/` | Primary implementation, built with ESP-IDF |
+| `current/BlobDetectionArduinoIDE/` | Arduino IDE port of the same detection algorithm — see [ESP-IDF vs Arduino IDE](#esp-idf-vs-arduino-ide-important-differences) before assuming these behave identically |
+| `current/BlobDetectionCalibrate.ino` / `current/BlobDetectionCalibrate.py` | Interactive LAB threshold calibration tool |
+| `current/ViewDetections.py` | Live viewer for telemetry + (optionally) annotated video stream |
+| `future/BlobDetectionIMU/` | Single-core build: same blob detector, adds MPU-6050 IMU sampling on the same core/loop |
+| `future/BlobDetectionIMUMultiCore/` | Dual-core build: Core 0 handles IMU sampling + telemetry, Core 1 handles vision, non-blocking |
+| `future/ViewDetections.py` | Live viewer for the `future/` builds' telemetry format (see [Telemetry format](#telemetry-format)) — `future/` has no calibration tool of its own; use `current/BlobDetectionCalibrate.ino` / `.py` to derive `THRESHOLD_BLIMP` values, see below |
+
+`future/` is where active development on the IMU-augmented detector happens; `current/`
+is the stable, camera-only baseline described in most of this document.
 
 ---
 
 ### Calibrating the color mask
 
-1. Flash `BlobDetectionCalibrate.ino` onto the Xiao ESP32S3.
+1. Flash `current/BlobDetectionCalibrate.ino` onto the Xiao ESP32S3.
 2. Keep the board connected to the computer over USB.
-3. Run `BlobDetectionCalibrate.py` on the computer. A window opens showing the
+3. Run `current/BlobDetectionCalibrate.py` on the computer. A window opens showing the
    default mask applied live.
 4. Adjust the mask with the following keys:
    | Parameter | Decrease | Increase |
@@ -42,8 +54,14 @@ telemetry (and optionally annotated JPEG video) over USB.
    | `B_min` | `5` | `T` |
    | `B_max` | `6` | `Y` |
 5. Every adjustment prints the current mask values to the terminal.
-6. The default starting mask lives in `BlobDetectionCalibrate.py` (lines 14–16) —
+6. The default starting mask lives in `current/BlobDetectionCalibrate.py` (lines 14–16) —
    edit it there if you want a different starting point for future calibration runs.
+
+`future/` does not have its own calibration tool — it relies entirely on `current/`'s
+calibration workflow. Calibrate against `current/BlobDetectionCalibrate.ino`/`.py`
+first, then copy the resulting `THRESHOLD_BLIMP` values into whichever `future/` build
+you're using (see below).
+
 #### Applying a calibrated mask to the detector
 
 Copy the printed `L_min/L_max/A_min/A_max/B_min/B_max` values into:
@@ -52,25 +70,30 @@ Copy the printed `L_min/L_max/A_min/A_max/B_min/B_max` values into:
 static const LabThreshold THRESHOLD_BLIMP = { l_min, l_max, a_min, a_max, b_min, b_max };
 ```
 
-This line must be updated **identically in both** the ESP-IDF (`main.cpp`) and
-Arduino IDE (`.ino`) versions — they don't share a config file, so a recalibration
-only takes effect on whichever build you update.
+This line exists independently in `current/BlobDetectionESP-IDF/main.cpp`,
+`current/BlobDetectionArduinoIDE/BlobDetectionArduinoIDE.ino`,
+`future/BlobDetectionIMU/main.cpp`, and `future/BlobDetectionIMUMultiCore/main.cpp` —
+none of these share a config file, so a recalibration only takes effect on whichever
+file you update.
 
 ---
 
 ### Running the detector
 
-1. Flash one of the blob detector builds (ESP-IDF or Arduino, see build steps below)
-   onto the Xiao ESP32S3.
+1. Flash one of the blob detector builds (`current/` ESP-IDF, `current/` Arduino, or a
+   `future/` IMU build — see build steps below) onto the Xiao ESP32S3.
 2. Keep the board connected over USB.
-3. Run `ViewDetections.py` on the computer to view live telemetry (and video, if
-   `DEBUG_STREAM` is enabled — see [Runtime flags](#runtime-flags)).
+3. Run the matching `ViewDetections.py` (`current/ViewDetections.py` for `current/`
+   builds, `future/ViewDetections.py` for `future/` builds — the telemetry layouts
+   differ, see [Telemetry format](#telemetry-format)) on the computer to view live
+   telemetry (and video, if `DEBUG_STREAM` is enabled — see [Runtime flags](#runtime-flags)).
+
 ---
 
 ### Building — ESP-IDF version
 
 ```bash
-cd BlobDetectionESP-IDF
+cd current/BlobDetectionESP-IDF
 idf.py fullclean
 # Equivalent to manually deleting: build/, managed_components/, dependencies.lock, sdkconfig
 idf.py set-target esp32s3
@@ -83,29 +106,46 @@ previous run can prevent the flash from starting.
 
 ### Building — Arduino IDE version
 
-Open `BlobDetectionArduinoIDE.ino` in Arduino IDE and flash normally. **Important:**
-none of the tuning in `sdkconfig.defaults` (see below) applies to this build — the
-Arduino IDE uses a separate, prebuilt core and its own build settings. See
+Open `current/BlobDetectionArduinoIDE.ino` in Arduino IDE and flash normally.
+**Important:** none of the tuning in `sdkconfig.defaults` (see below) applies to this
+build — the Arduino IDE uses a separate, prebuilt core and its own build settings. See
 [ESP-IDF vs Arduino IDE](#esp-idf-vs-arduino-ide-important-differences) for what
 you need to configure manually to get comparable behavior.
+
+### Building — IMU versions (`future/`)
+
+`future/BlobDetectionIMU` and `future/BlobDetectionIMUMultiCore` are both ESP-IDF
+projects, built the same way as `current/BlobDetectionESP-IDF`:
+
+```bash
+cd future/BlobDetectionIMU        # or future/BlobDetectionIMUMultiCore
+idf.py fullclean
+idf.py set-target esp32s3
+idf.py -p <PORT> build flash
+```
+
+Both pull in the `mpu6050` and `i2cdev` components in addition to everything
+`current/BlobDetectionESP-IDF` uses. Same reset-before-flash note as above applies.
 
 ---
 
 ### Runtime flags
 
-Both the ESP-IDF and Arduino versions are controlled by the same two `#define`s
-at the top of the source file:
+All four builds (`current/` and `future/`) share the same two `#define`s at the top of
+the source file:
 
 ```cpp
 #define DEBUG_STREAM 1        // 1 = annotated JPEG video + telemetry, 0 = telemetry only
 #define MASKED_DEBUG_STREAM 1 // 1 = video shows the binary threshold mask, 0 = normal color video with overlays
 ```
 
-`MASKED_DEBUG_STREAM` only has an effect when `DEBUG_STREAM` is `1`.
+`MASKED_DEBUG_STREAM` only has an effect when `DEBUG_STREAM` is `1`. Note the `future/`
+builds default to `DEBUG_STREAM 0` (telemetry only), unlike `current/`'s default of `1`
+— check the top of the file for whichever build you're flashing.
 
 | `DEBUG_STREAM` | `MASKED_DEBUG_STREAM` | Output |
 |---|---|---|
-| 0 | — | Telemetry header only (~30 bytes/frame), no image. Fastest, lowest USB bandwidth. |
+| 0 | — | Telemetry header only, no image. Fastest, lowest USB bandwidth. |
 | 1 | 0 | Full-color annotated video (ROI + blob overlay) + telemetry |
 | 1 | 1 | Binary threshold-mask video (what the detector actually "sees") + telemetry, useful for tuning `THRESHOLD_BLIMP` |
 
@@ -116,16 +156,24 @@ and the associated per-frame CPU/USB cost entirely.
 
 ### Telemetry format
 
-Every frame (in all three `DEBUG_STREAM` modes) begins with a fixed 30-byte
-`FrameHeader`, little-endian:
+Every frame begins with a fixed `FrameHeader`, little-endian:
 
 ```cpp
-struct FrameHeader {          // 30 bytes total
+struct FrameHeader {
   uint8_t  magic[4];          // {0xFF, 0xAA, 0x55, 0xFF} — frame sync marker
   uint32_t payload_len;       // 0 if telemetry-only; JPEG byte length otherwise
-  TelemetryData telem;        // 22 bytes, see below
+  TelemetryData telem;        // layout differs between current/ and future/, see below
 };
+```
 
+If `payload_len > 0`, exactly that many bytes of JPEG data immediately follow the
+header. `ViewDetections.py` re-syncs on the magic bytes if the stream is ever
+corrupted — see [Troubleshooting](#troubleshooting) if you see repeated resync
+messages.
+
+**`current/` — 30-byte `FrameHeader` (22-byte `TelemetryData`):**
+
+```cpp
 struct TelemetryData {        // 22 bytes, all uint16_t
   uint16_t hb;                 // heartbeat / last-detection timestamp (ms)
   uint16_t roi_x, roi_y, roi_w, roi_h;   // current tracking ROI
@@ -135,10 +183,62 @@ struct TelemetryData {        // 22 bytes, all uint16_t
 };
 ```
 
-If `payload_len > 0`, exactly that many bytes of JPEG data immediately follow the
-header. `ViewDetections.py` re-syncs on the magic bytes if the stream is ever
-corrupted — see [Troubleshooting](#troubleshooting) if you see repeated resync
-messages.
+**`future/` — 34-byte `FrameHeader` (26-byte `TelemetryData`):**
+
+```cpp
+struct __attribute__((packed)) TelemetryData {  // 26 bytes
+  uint16_t hb;                 // heartbeat / last-detection timestamp (ms)
+  uint16_t cx, cy, w, h;       // detected blob centroid + bounding box size
+  float ax, ay, az;            // MPU-6050 acceleration, all 3 axes
+  float tz;                    // MPU-6050 yaw rate (gyro Z)
+};
+```
+
+`future/`'s `TelemetryData` is `packed` and swaps the tracking-ROI/frame-size fields
+for the four IMU floats — it drops `roi_x/roi_y/roi_w/roi_h` and `max_w/max_h` from
+`current/`'s layout. The two formats are not interchangeable; use `current/ViewDetections.py`
+for `current/` builds and `future/ViewDetections.py` for `future/` builds.
+
+---
+
+### IMU implementations (`future/`)
+
+`future/BlobDetectionIMU` and `future/BlobDetectionIMUMultiCore` add an MPU-6050 IMU,
+polled over I2C, alongside the same camera-based blob detection pipeline used in
+`current/`. The IMU is **read-only telemetry** in both builds — there is no sensor
+fusion with the vision tracking, and neither build drives motors; they only report
+`ax, ay, az` (acceleration, all three axes) and `tz` (yaw rate) alongside the existing
+blob/ROI telemetry.
+
+**Wiring (both builds):**
+
+| MPU-6050 pin | Xiao ESP32-S3 pin |
+|---|---|
+| SDA | GPIO5 |
+| SCL | GPIO6 |
+| I2C address | `0x68` |
+
+I2C is run at 200 kHz. Both builds probe for the MPU-6050 at boot and retry once a
+second, logging over serial, until the device responds — the board otherwise waits
+indefinitely rather than falling through to `errorLoop()`.
+
+**`BlobDetectionIMU` (single-core):** IMU sampling and blob detection run in the same
+loop/core, the same structural pattern as `current/`'s single `visionTask`-style loop.
+
+**`BlobDetectionIMUMultiCore`:** splits the work across the ESP32-S3's two cores,
+non-blocking:
+- **Core 0** — `imuTelemetryTask`: samples the MPU-6050 at a fixed 100 Hz
+  (`vTaskDelayUntil`-paced) and, when `DEBUG_STREAM` is `0`, emits telemetry frames
+  directly at that same 100 Hz rate.
+- **Core 1** — `visionTask`: runs the camera capture + blob detection loop as fast as
+  frames arrive, and (when `DEBUG_STREAM` is `1`) emits the annotated/masked video
+  stream itself.
+
+The two tasks share state (latest blob/ROI, latest IMU sample) through two mutex-guarded
+structs (`g_vision_state`, `g_imu_data|VisionState`, `ImuData`) rather than direct
+cross-task calls, with short (2 ms) mutex timeouts so neither task blocks waiting on
+the other — a missed update just means that frame's telemetry carries the previous
+sample instead of a fresh one.
 
 ---
 
@@ -180,10 +280,11 @@ value is safe.
 
 ### ESP-IDF vs Arduino IDE: important differences
 
-The two builds run the **same detection algorithm** (bit-packed mask, scanline
-flood fill, `IRAM_ATTR`-pinned hot functions) — but the surrounding
-infrastructure differs, and the differences matter for correctness and
-performance parity:
+`current/BlobDetectionESP-IDF` and `current/BlobDetectionArduinoIDE` run the **same
+detection algorithm** (bit-packed mask, scanline flood fill, `IRAM_ATTR`-pinned hot
+functions) — but the surrounding infrastructure differs, and the differences matter
+for correctness and performance parity. (The `future/` builds are ESP-IDF only, so
+this section doesn't apply to them.)
 
 - **`sdkconfig.defaults` does not apply to the Arduino build.** Compiler
   optimization level, FreeRTOS tick rate, and console/log configuration are all
@@ -206,6 +307,7 @@ performance parity:
   `processingTask` does (`taskYIELD()` after every frame). This was added on the
   ESP-IDF side specifically to prevent USB stream corruption under load — watch
   for the same symptom on the Arduino build before assuming it's unaffected.
+
 ---
 
 ### Troubleshooting
@@ -221,6 +323,11 @@ corrupted in transit. Common causes, roughly in order of likelihood:
    `DEBUG_STREAM 1` mode are the most likely trigger) — check that writes aren't
    silently truncated; a partial write followed by the next frame's header will
    desync the stream exactly like this.
+4. Using the wrong `ViewDetections.py` for the build flashed — `current/` and
+   `future/` telemetry structs are different sizes and layouts (see
+   [Telemetry format](#telemetry-format)); pointing the wrong viewer at a build
+   will misparse every frame.
+
 **Camera init fails / LED blinks in a fast on/off pattern**
 `errorLoop()` triggers on camera init failure or SRAM allocation failure. Check
 that PSRAM is enabled in your build config, and that the wiring matches the pin
@@ -248,6 +355,11 @@ definitions at the top of the source file.
   Instruction RAM instead of leaving it flash-cached — used on the hot,
   per-frame functions (`findLargestBlob`, `generateSramMaskFast`) to avoid
   flash-cache-miss stalls on the tightest loops in the pipeline.
+- **`future/` IMU builds are camera + IMU only** — they read the MPU-6050 for
+  telemetry but do not perform sensor fusion with the vision tracking and do not
+  control any motors, unlike the full ESP-FLY flight-controller firmware that
+  the IMU/Motor Driver module normally pairs with.
+
 ---
 
 ### Project history
@@ -271,3 +383,10 @@ Rough chronological order, oldest first:
 7. **BlobDetectionSpeedTest** — a modified `BlobDetectionESP-IDF` with image
    streaming removed and timing instrumentation added. Reached a 130ms loop
    time; paired with `speedTest.py`.
+8. **BlobDetectionIMU** — camera-only detector reworked to also poll an
+   MPU-6050 IMU (acceleration + yaw rate) on the same core, wired through the
+   ESP-FLY IMU/Motor Driver module's MPU-6050. First step toward flight-relevant
+   telemetry; no sensor fusion or motor control.
+9. **BlobDetectionIMUMultiCore** — same IMU + blob detection pipeline as
+   `BlobDetectionIMU`, restructured across both ESP32-S3 cores (IMU/telemetry
+   on Core 0, vision on Core 1) so neither task blocks the other.
