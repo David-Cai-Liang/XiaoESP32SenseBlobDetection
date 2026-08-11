@@ -1,4 +1,4 @@
-#define DEBUG_STREAM 0
+#define DEBUG_STREAM 1
 #define MASKED_DEBUG_STREAM 1
 
 #include <stdio.h>

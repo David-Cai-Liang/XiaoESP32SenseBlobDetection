@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.cpp"
+    SRCS "BlobDetectionIMUMultiCoreInterrupt.cpp"
     INCLUDE_DIRS "."
     REQUIRES esp32-camera esp_jpeg vfs mpu6050 i2cdev
 )

@@ -6,7 +6,7 @@ import datetime
 
 # Update to match your Xiao COM port:
 # Windows: 'COM3', 'COM4', etc. | Mac/Linux: '/dev/ttyACM0'
-SERIAL_PORT = 'COM31'
+SERIAL_PORT = 'COM29'
 BAUD_RATE = 115200
 
 MAGIC_HEADER = b'\xff\xaa\x55\xff'
