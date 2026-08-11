@@ -48,9 +48,10 @@ static const char *TAG = "MAIN";
 #define MAX_H 240
 #define MAX_STACK_SIZE 8192 // 4096 entries (32 KB in SRAM) for Scanline Flood Fill
 
-// IMU PINS
+// IMU PINS & INTERRUPT CONFIG
 #define PIN_SDA GPIO_NUM_5
 #define PIN_SCL GPIO_NUM_6
+#define PIN_INT GPIO_NUM_8  // Connect MPU6050 INT pin to GPIO 7
 #define MPU_ADDR 0x68
 
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
@@ -102,6 +103,7 @@ static ImuData g_imu_data = {};
 
 static SemaphoreHandle_t xVisionMutex = NULL;
 static SemaphoreHandle_t xImuMutex = NULL;
+static TaskHandle_t xImuTaskHandle = NULL; // Handle used by ISR for notification
 
 static Rect tracking_roi = {0, 0, MAX_W, MAX_H};
 static bool target_locked = false;
@@ -110,6 +112,15 @@ static uint16_t heartbeat = 1;
 static uint8_t threshold_lut[8192];
 static uint8_t *mask_buf = NULL;     // Internal SRAM (76.8 KB)
 static uint32_t *stack_buf = NULL;   // Internal SRAM (16 KB)
+
+// --- Interrupt Service Routine (ISR) ---
+static void IRAM_ATTR mpu6050_isr_handler(void *arg) {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  if (xImuTaskHandle != NULL) {
+    vTaskNotifyGiveFromISR(xImuTaskHandle, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+  }
+}
 
 static inline float srgbToLinear(float c) {
   return (c <= 0.04045f) ? (c / 12.92f) : powf((c + 0.055f) / 1.055f, 2.4f);
@@ -521,7 +532,6 @@ void visionTask(void *pvParameters) {
       tracking_roi = {0, 0, MAX_W, MAX_H};
     }
 
-    // Publish vision tracking state to shared memory (Non-blocking update)
     if (xSemaphoreTake(xVisionMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
       g_vision_state.blob = blob;
       g_vision_state.roi = tracking_roi;
@@ -531,7 +541,6 @@ void visionTask(void *pvParameters) {
     }
 
     #if DEBUG_STREAM
-      // Fetch latest IMU snapshot for debug streaming frame
       ImuData imu_snap = {};
       if (xSemaphoreTake(xImuMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
         imu_snap = g_imu_data;
@@ -555,18 +564,16 @@ void visionTask(void *pvParameters) {
       streamDebug(fb, blob, tracking_roi, target_locked, telem);
     #endif
 
-    // Instantly return camera buffer to keep driver buffer queue full
     esp_camera_fb_return(fb);
   }
 }
 
-// ==================== CORE 0: IMU & TELEMETRY TASK ====================
+// ==================== CORE 0: INTERRUPT-DRIVEN IMU TASK ====================
 void imuTelemetryTask(void *pvParameters) {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(10); // 100 Hz sampling rate
-
   while (1) {
-    // 1. Read IMU data independently at 100 Hz
+    // Block indefinitely until notified by the MPU6050 interrupt ISR
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
     mpu6050_acceleration_t accel = {};
     mpu6050_rotation_t rotation = {};
     float temp = 0.0f;
@@ -584,7 +591,6 @@ void imuTelemetryTask(void *pvParameters) {
     }
 
     #if !DEBUG_STREAM
-      // 2. In non-debug mode, emit binary telemetry at fixed 100 Hz rate
       VisionState vision_snap = {};
       if (xSemaphoreTake(xVisionMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
         vision_snap = g_vision_state;
@@ -607,9 +613,6 @@ void imuTelemetryTask(void *pvParameters) {
 
       sendTelemetry(telem);
     #endif
-
-    // Sleep precisely until next 10ms boundary
-    vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
 }
 
@@ -622,7 +625,7 @@ extern "C" void app_main(void) {
   gpio_set_direction(LED_GPIO_NUM, GPIO_MODE_OUTPUT);
   gpio_set_level(LED_GPIO_NUM, 0);
 
-  // Initialize IMU
+  // --- Initialize IMU ---
   ESP_ERROR_CHECK(i2cdev_init());
   dev = {};
   ESP_ERROR_CHECK(mpu6050_init_desc(&dev, MPU_ADDR, 0, PIN_SDA, PIN_SCL));
@@ -640,6 +643,17 @@ extern "C" void app_main(void) {
       vTaskDelay(pdMS_TO_TICKS(1000));
   }
   ESP_ERROR_CHECK(mpu6050_init(&dev));
+
+  mpu6050_set_int_enabled(&dev, true);
+
+  // --- ESP32 Interrupt GPIO Configuration ---
+  gpio_config_t io_conf = {};
+  io_conf.intr_type = GPIO_INTR_POSEDGE; // Trigger interrupt on rising edge
+  io_conf.mode = GPIO_MODE_INPUT;
+  io_conf.pin_bit_mask = (1ULL << PIN_INT);
+  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+  gpio_config(&io_conf);
 
   vTaskDelay(pdMS_TO_TICKS(500));
 
@@ -663,9 +677,13 @@ extern "C" void app_main(void) {
   xVisionMutex = xSemaphoreCreateMutex();
   xImuMutex    = xSemaphoreCreateMutex();
 
-  // Core 0: Decoupled 100Hz IMU sampling & telemetry generator
-  xTaskCreatePinnedToCore(imuTelemetryTask, "imu_telem_task", 8192, NULL, 5, NULL, 0);
+  // Install GPIO Interrupt Handler Service and attach MPU6050 INT handler
+  gpio_install_isr_service(0);
+  gpio_isr_handler_add(PIN_INT, mpu6050_isr_handler, NULL);
+
+  // Core 0: Interrupt-driven IMU sampling & telemetry generator
+  xTaskCreatePinnedToCore(imuTelemetryTask, "imu_telem_task", 8192, NULL, 5, &xImuTaskHandle, 0);
 
   // Core 1: High-speed Vision processing loop
-  xTaskCreatePinnedToCore(visionTask,       "vision_task",    16384, NULL, 5, NULL, 1);
+  xTaskCreatePinnedToCore(visionTask, "vision_task", 16384, NULL, 5, NULL, 1);
 }
