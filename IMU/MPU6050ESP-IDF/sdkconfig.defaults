@@ -1,0 +1,5 @@
+# Line ending setting for raw binary streaming (prevents 0x0A -> 0x0D 0x0A translation)
+CONFIG_NEWLIB_STDOUT_LINE_ENDING_CRLF=n
+CONFIG_NEWLIB_STDOUT_LINE_ENDING_LF=y
+# Arduino IDE does not support ANSI escape color codes
+CONFIG_LOG_COLORS=n
