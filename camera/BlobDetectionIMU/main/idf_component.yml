@@ -1,7 +1,0 @@
-dependencies:
-  espressif/esp32-camera:
-    version: '*'
-  esp-idf-lib/mpu6050:
-    version: '*'
-  esp-idf-lib/i2cdev:
-    version: '*'

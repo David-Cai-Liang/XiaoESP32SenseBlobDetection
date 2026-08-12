@@ -18,7 +18,7 @@ telemetry (and optionally annotated JPEG video) over USB.
   not use the ESP-FLY board's motor drivers, and there's no dependency on the rest of
   the ESP-FLY firmware/hardware stack. See [IMU implementations](#imu-implementations-future)
   below.
-
+  - Note: You cannot use the SD card and IMU at the same time because GPIO 8 is used by both.
 ---
 
 ### Repository layout
@@ -26,10 +26,11 @@ telemetry (and optionally annotated JPEG video) over USB.
 | Path | What it is |
 |---|---|
 | `camera/BlobDetectionESP-IDF/` | Primary implementation, built with ESP-IDF |
-| `camera/BlobDetectionArduinoIDE/` | Arduino IDE port of the same detection algorithm — see [ESP-IDF vs Arduino IDE](#esp-idf-vs-arduino-ide-important-differences) before assuming these behave identically |
+| `camera/BlobDetectionArduinoIDE/` | Arduino IDE port of `camera/BlobDetectionESP-IDF/` — see [ESP-IDF vs Arduino IDE](#esp-idf-vs-arduino-ide-important-differences) before assuming these behave identically |
 | `camera/BlobDetectionCalibrate.ino` / `camera/BlobDetectionCalibrate.py` | Interactive LAB threshold calibration tool |
 | `camera/ViewDetections.py` | Live viewer for telemetry + (optionally) annotated video stream |
 | `camera+IMU/BlobDetectionIMU/` | Single-core build: same blob detector, adds MPU-6050 IMU sampling on the same core/loop |
+| `camera+IMU/BlobDetectionIMUArduinoIDE/` | Arduino IDE port of `camera+IMU/BlobDetectionIMU/` — see [ESP-IDF vs Arduino IDE](#esp-idf-vs-arduino-ide-important-differences) before assuming these behave identically |
 | `camera+IMU/BlobDetectionIMUMultiCore/` | Dual-core build: Core 0 handles IMU sampling + telemetry, Core 1 handles vision, non-blocking |
 | `camera+IMU/BlobDetectionIMUMultiCore/` | Version of `camera+IMU/BlobDetectionIMUMultiCore/` that uses IMU interrupts instead of pulling every 10 milliseconds |
 | `camera+IMU/ViewDetectionsWithIMU.py` | Live viewer for the `camera+IMU/` builds' telemetry format (see [Telemetry format](#telemetry-format)) — `camera+IMU/` has no calibration tool of its own; use `camera/BlobDetectionCalibrate.ino` / `.py` to derive `THRESHOLD_BLIMP` values, see below |
