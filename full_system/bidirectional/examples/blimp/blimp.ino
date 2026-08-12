@@ -23,7 +23,7 @@ const int MOTOR_M4_FL = 1; // Front Left  (M4) -> Pin 1 (Orange Wire)
 // Yaw controller tuning
 // Deadzone is a 40x40 px box centered on the frame; only the x-extent (+/-20px)
 // is used since this controller only corrects yaw (left/right).
-const int YAW_DEADZONE_HALF_PX = 20;     // half-width of the 40px-wide deadzone
+const int YAW_DEADZONE_HALF_PX = 40;     // half-width of the 40px-wide deadzone
 const int YAW_GAIN = 1;                  // motor power added per pixel of x error
 const int MOTOR_MAX = 255;               // analogWrite() PWM ceiling (8-bit default)
 
