@@ -12,6 +12,21 @@ const int MOTOR_M2_RR = 4; // Rear Right  (M2) -> Pin 4 (Green Wire)
 const int MOTOR_M3_RL = 3; // Rear Left   (M3) -> Pin 3 (Blue Wire)
 const int MOTOR_M4_FL = 1; // Front Left  (M4) -> Pin 1 (Orange Wire)
 
+// === Control Mode (compile-time select) =====================================
+// MODE_MANUAL       - motors driven directly by ControlPacket from the base station
+// MODE_PROPORTIONAL - motors driven by a P controller on vision blob yaw error,
+//                      incoming manual stick input is ignored
+#define MODE_MANUAL       0
+#define MODE_PROPORTIONAL 1
+#define CONTROL_MODE MODE_PROPORTIONAL   // <-- change this + reflash to switch modes
+
+// Yaw controller tuning
+// Deadzone is a 40x40 px box centered on the frame; only the x-extent (+/-20px)
+// is used since this controller only corrects yaw (left/right).
+const int YAW_DEADZONE_HALF_PX = 20;     // half-width of the 40px-wide deadzone
+const int YAW_GAIN = 1;                  // motor power added per pixel of x error
+const int MOTOR_MAX = 255;               // analogWrite() PWM ceiling (8-bit default)
+
 // REPLACE WITH YOUR BASE STATION MAC ADDRESS
 uint8_t baseStationAddress[] = {0x30, 0x30, 0xF9, 0x17, 0xFB, 0x8C};
 
@@ -102,26 +117,51 @@ void loop() {
 
   bool stale = (millis() - lastRecvTime > CONTROL_TIMEOUT_MS);
 
-  // 3. Process Received Motor Commands
-  if (newControlAvailable || stale) {
-    newControlAvailable = false;
-    
-    int16_t m1 = stale ? 0 : incomingControl.motors[0];
-    int16_t m2 = stale ? 0 : incomingControl.motors[1];
-    int16_t m3 = stale ? 0 : incomingControl.motors[2];
-    int16_t m4 = stale ? 0 : incomingControl.motors[3];
-    // Apply motor inputs to hardware here
-    Serial.printf("[MOTORS] M1: %d | M2: %d | M3: %d | M4: %d\n",
-                  m1,
-                  m2,
-                  m3,
-                  m4);
+  // 3. Compute Motor Outputs for the active control mode
+  int16_t m1 = 0, m2 = 0, m3 = 0, m4 = 0;
 
-    analogWrite(MOTOR_M1_FR, m1);
-    analogWrite(MOTOR_M2_RR, m2);
-    analogWrite(MOTOR_M3_RL, m3);
-    analogWrite(MOTOR_M4_FL, m4);
+#if CONTROL_MODE == MODE_MANUAL
+  // Drive motors directly from the base station's ControlPacket.
+  // Watchdog: if no packet has arrived within CONTROL_TIMEOUT_MS, force zero.
+  newControlAvailable = false;
+  m1 = stale ? 0 : incomingControl.motors[0];
+  m2 = stale ? 0 : incomingControl.motors[1];
+  m3 = stale ? 0 : incomingControl.motors[2];
+  m4 = stale ? 0 : incomingControl.motors[3];
+
+#elif CONTROL_MODE == MODE_PROPORTIONAL
+  // Manual stick input is ignored in this mode.
+  newControlAvailable = false;
+
+  // Same watchdog as manual mode: if the base station link itself has gone
+  // stale, stay at zero rather than continuing to chase a possibly-stale target.
+  bool target_visible = (vData.w > 0 && vData.h > 0);
+  if (!stale && target_visible) {
+    int center_x = MAX_W / 2;                 // 320 / 2 = 160
+    int error_x  = (int)vData.cx - center_x;   // + => target is right of center
+
+    if (abs(error_x) > YAW_DEADZONE_HALF_PX) {
+      int correction = (abs(error_x) - YAW_DEADZONE_HALF_PX) * YAW_GAIN;
+      if (error_x > 0) {
+        m2 = correction; // target right of center -> yaw right (mirrors 'D' key -> M2 Rear Right)
+      } else {
+        m3 = correction; // target left of center  -> yaw left  (mirrors 'A' key -> M3 Rear Left)
+      }
+    }
   }
+#endif
+
+  m1 = constrain(m1, 0, MOTOR_MAX);
+  m2 = constrain(m2, 0, MOTOR_MAX);
+  m3 = constrain(m3, 0, MOTOR_MAX);
+  m4 = constrain(m4, 0, MOTOR_MAX);
+
+  Serial.printf("[MOTORS] M1: %d | M2: %d | M3: %d | M4: %d\n", m1, m2, m3, m4);
+
+  analogWrite(MOTOR_M1_FR, m1);
+  analogWrite(MOTOR_M2_RR, m2);
+  analogWrite(MOTOR_M3_RL, m3);
+  analogWrite(MOTOR_M4_FL, m4);
 
   vTaskDelay(1);
 }

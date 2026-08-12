@@ -3,14 +3,14 @@
 A vision-tracking, IMU-stabilized blimp controlled wirelessly from a keyboard, built on two ESP32 boards linked over **ESP-NOW** and bridged to a PC over **USB serial**.
 
 ```
- ┌─────────────┐   USB Serial    ┌────────────────┐   ESP-NOW (2.4GHz)   ┌──────────────┐
- │ base_station │ <────wired────>│  Base Station   │ <──────wireless─────>│    Blimp     │
- │    .py       │  (keyboard in, │    (ESP32)      │   telemetry / ctrl    │   (ESP32)    │
- │  (your PC)   │  telemetry out)│  base_station.ino│                      │  blimp.ino   │
- └─────────────┘                 └────────────────┘                      └──────┬───────┘
-                                                                                  │
-                                                                     ┌────────────┼────────────┐
-                                                                     │            │             │
+ ┌──────────────┐   USB Serial    ┌────────────────┐   ESP-NOW (2.4GHz)   ┌──────────────┐
+ │ base_station │ <────wired────> │  Base Station  │ <──────wireless─────>│    Blimp     │
+ │     .py      │  (keyboard in,  │    (ESP32)     │   telemetry / ctrl   │   (ESP32)    │
+ │   (your PC)  │  telemetry out) │base_station.ino│                      │  blimp.ino   │
+ └──────────────┘                 └────────────────┘                      └──────┬───────┘
+                                                                                 │
+                                                                     ┌───────────┼────────────┐
+                                                                     │           │            │
                                                                 Vision (cam)  IMU (MPU6050)  4x Motors
                                                               Vision.cpp/h   IMU.cpp/h      (analogWrite)
 ```
@@ -56,7 +56,7 @@ Two fixed-size, `packed` structs are exchanged directly as ESP-NOW payloads:
 ```cpp
 // Blimp -> Base station
 typedef struct __attribute__((packed)) {
-  VisionData vision; // cx, cy, w, h (4x uint16_t) — locked ROI / blob box
+  VisionData vision; // cx, cy, w, h (4x uint16_t) — blob centroid + ROI box size
   IMUData imu;       // ax, ay, az, tz (4x float)  — accel XYZ + gyro Z
 } TelemetryPacket;
 
@@ -65,6 +65,8 @@ typedef struct __attribute__((packed)) {
   int16_t motors[4]; // M1, M2, M3, M4
 } ControlPacket;
 ```
+
+`vision.cx`/`vision.cy` are the tracked blob's true centroid in frame coordinates (0–320, 0–240 on the QVGA camera); `vision.w`/`vision.h` are the padded tracking ROI's dimensions, useful for display but not for locating the target itself.
 
 Each side's `esp_now_add_peer` must point at the other's MAC address — set these in both `.ino` files before flashing:
 
@@ -90,6 +92,8 @@ Control (PC -> Base Station), 12 bytes total:
 ### 1. Flash the firmware (Arduino IDE / arduino-cli)
 
 Required libraries: `esp_now`, `WiFi`, `esp_camera` (ESP32 board package), `Adafruit_MPU6050`, `Adafruit_Sensor`, `Wire`.
+
+> **Before compiling either sketch:** copy the `bidirectional` folder into your Arduino `libraries` folder (e.g. `~/Documents/Arduino/libraries/` on most OSes, `Documents\Arduino\libraries\` on Windows). Both `blimp.ino` and `base_station.ino` depend on the shared code in it, and the Arduino IDE/CLI won't find it otherwise.
 
 1. Find each board's MAC address (e.g. `WiFi.macAddress()` in a throwaway sketch).
 2. Set `blimpAddress[]` in `base_station.ino` and `baseStationAddress[]` in `blimp.ino`.
@@ -120,26 +124,55 @@ M1 carries a constant idle offset of `10` even with no keys held (see `compute_m
 
 The terminal shows live motor state, the blimp's tracked vision blob (center/box), IMU readings, and round-trip telemetry latency/FPS. On exit it prints a benchmark summary (frame count, average delta, jitter, throughput).
 
+## Control modes (compile-time select)
+
+`blimp.ino` supports two motor-control modes, chosen at **compile time** via a `#define` near the top of the file — flip it and reflash to switch:
+
+```cpp
+#define MODE_MANUAL       0
+#define MODE_PROPORTIONAL 1
+#define CONTROL_MODE MODE_PROPORTIONAL   // <-- change this + reflash to switch modes
+```
+
+Because this is resolved by the preprocessor (`#if CONTROL_MODE == ...`), only the selected mode's code is actually compiled in.
+
+### `MODE_MANUAL`
+
+Motors are driven directly from the base station's `ControlPacket` — i.e. whatever `base_station.py`'s keyboard input computed (see [Controls](#controls) below).
+
+### `MODE_PROPORTIONAL`
+
+Incoming manual stick input is ignored. Instead, a proportional (P) controller steers **yaw only** (left/right turning) off the vision blob's centroid:
+
+- **Deadzone:** a 40×40 px box centered on the 320×240 frame (only the x-extent, ±20 px around `cx = 160`, is used since this controller only corrects yaw).
+- **Gain:** for every pixel the centroid's x-coordinate sits outside the deadzone, the corresponding motor's power increases by `YAW_GAIN` (1).
+- **Direction:** target right of center → boost `M2` (Rear Right, mirrors the `D` key); target left of center → boost `M3` (Rear Left, mirrors the `A` key). This mirrors the manual key bindings but hasn't been flight-verified — if the blimp turns away from the target instead of toward it, swap the `m2`/`m3` assignment in `blimp.ino`.
+- All motor outputs are clamped to `[0, 255]` (`MOTOR_MAX`) before `analogWrite`.
+
+If no target is currently locked (`vData.w == 0 && vData.h == 0`), the controller applies no correction and the blimp sits at zero thrust rather than steering blind.
+
+**This mode still respects the control-link watchdog** (see below) — losing contact with the base station zeroes the motors regardless of what the camera sees, so there's always a way to kill the blimp by cutting the base station's link, even in autonomous mode. This does mean `base_station.py` (or something) must still be actively sending `ControlPacket`s at ~20 Hz for the blimp to leave the "stale" state, even though those packets' motor values are discarded in this mode — if nothing is sending, the blimp stays at zero thrust indefinitely.
+
+> **`base_station.ino` must be flashed and powered on `MODE_PROPORTIONAL` too.** It's not just a manual-mode relay — it's the source of the heartbeat packets the blimp's watchdog needs to leave the "stale" state (see below). Without it running, the blimp will sit at zero thrust even with a target locked in view.
+
 ## Vision tracking
 
 `Vision.cpp` converts each captured frame to CIELAB color space via a precomputed 64K-entry lookup table, thresholds against a configured `LabThreshold`, and flood-fills to find the largest connected blob above an area threshold. Once a target is found it locks onto a padded ROI around it (`AREA_THRESHOLD_LOCKED`) for cheaper tracking on subsequent frames, and falls back to a full-frame search (`AREA_THRESHOLD_SEARCH`) if the target is lost. Tune the color threshold in `Vision.h`'s `THRESHOLD_BLIMP` constant for your target's color under your lighting.
 
+The blob's true centroid (`largest.cx`/`largest.cy` from `findLargestBlob`) is what gets transmitted as `VisionData.cx`/`cy` and is what the proportional yaw controller reacts to — it is not the same as the padded tracking ROI's corner or size (`w`/`h`), which exist for telemetry/display only.
+
 ## Safety: control-link failsafe
 
-`blimp.ino` tracks `lastRecvTime` (updated in `OnDataRecv`) and treats the last command as **stale** if more than `CONTROL_TIMEOUT_MS` (currently 1000 ms) has passed since a `ControlPacket` was received:
+`blimp.ino` tracks `lastRecvTime` (updated in `OnDataRecv`, which fires on any received `ControlPacket`) and treats the link as **stale** if more than `CONTROL_TIMEOUT_MS` (currently 1000 ms) has passed since the last packet arrived:
 
 ```cpp
 bool stale = (millis() - lastRecvTime > CONTROL_TIMEOUT_MS);
-
-if (newControlAvailable || stale) {
-  newControlAvailable = false;
-  int16_t m1 = stale ? 0 : incomingControl.motors[0];
-  int16_t m2 = stale ? 0 : incomingControl.motors[1];
-  int16_t m3 = stale ? 0 : incomingControl.motors[2];
-  int16_t m4 = stale ? 0 : incomingControl.motors[3];
-  ...
-}
 ```
+
+`stale` acts as a heartbeat check, independent of control mode:
+
+- **`MODE_MANUAL`:** if stale, motor values are forced to zero instead of using the (possibly ancient) `incomingControl` values.
+- **`MODE_PROPORTIONAL`:** if stale, the yaw controller doesn't run at all — motors stay at zero — even if the camera can still see a target. This guarantees a human always has a way to stop the blimp (by killing the base station link) even while it's flying itself.
 
 If the base station crashes, loses power, goes out of range, or a packet is simply dropped over ESP-NOW, the blimp zeroes its own motors once the timeout elapses — it doesn't depend on a shutdown command actually arriving. `base_station.py`'s `Ctrl+C` handler (which flushes and resends an all-zero `ControlPacket` a few times) is a fast-path on top of this, not the only thing standing between "quit" and "still flying."
 
@@ -149,3 +182,5 @@ Note the 1000 ms timeout is fairly loose relative to the ~20 Hz (50 ms) control 
 
 - `esp_now_send` calls in both sketches don't check their return status, so a failed send is currently silent.
 - `CONTROL_TIMEOUT_MS` (1000 ms) is generous compared to the control loop's ~50 ms cadence; a tighter timeout would reduce how long the blimp can drift on a stale command before self-stopping.
+- The proportional yaw controller's turn direction (`M2` vs `M3` for a given error sign) is inferred from the manual key bindings, not confirmed in flight — verify and flip if needed.
+- The 40×40 px deadzone and `YAW_GAIN` of 1 are untuned starting values; expect to adjust both once you see how the blimp actually responds.

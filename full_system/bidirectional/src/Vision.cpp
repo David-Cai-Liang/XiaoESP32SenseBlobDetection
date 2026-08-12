@@ -269,41 +269,6 @@ static inline bool inBounds(int x, int y) {
   return x >= 0 && x < MAX_W && y >= 0 && y < MAX_H;
 }
 
-void Vision::drawOverlays(camera_fb_t *fb, Rect roi, Blob blob, bool locked) {
-  uint16_t *buf = (uint16_t *)fb->buf;
-  int stride = fb->width;
-
-  uint16_t COLOR_ROI  = locked ? 0xE007 : 0xE0FF;
-  uint16_t COLOR_BLOB = 0x00F8;
-
-  for (int t = 0; t < 2; t++) {
-    for (int x = roi.x - t; x < roi.x + roi.w + t; x++) {
-      if (inBounds(x, roi.y - 1 - t)) buf[(roi.y - 1 - t) * stride + x] = COLOR_ROI;
-      if (inBounds(x, roi.y + roi.h + t)) buf[(roi.y + roi.h + t) * stride + x] = COLOR_ROI;
-    }
-    for (int y = roi.y - t; y < roi.y + roi.h + t; y++) {
-      if (inBounds(roi.x - 1 - t, y)) buf[y * stride + (roi.x - 1 - t)] = COLOR_ROI;
-      if (inBounds(roi.x + roi.w + t, y)) buf[y * stride + (roi.x + roi.w + t)] = COLOR_ROI;
-    }
-  }
-
-  if (blob.pixels > 0) {
-    for (int x = blob.x; x < blob.x + blob.w; x++) {
-      if (inBounds(x, blob.y)) buf[blob.y * stride + x] = COLOR_BLOB;
-      if (inBounds(x, blob.y + blob.h - 1)) buf[(blob.y + blob.h - 1) * stride + x] = COLOR_BLOB;
-    }
-    for (int y = blob.y; y < blob.y + blob.h; y++) {
-      if (inBounds(blob.x, y)) buf[y * stride + blob.x] = COLOR_BLOB;
-      if (inBounds(blob.x + blob.w - 1, y)) buf[y * stride + (blob.x + blob.w - 1)] = COLOR_BLOB;
-    }
-
-    for (int d = -4; d <= 4; d++) {
-      if (inBounds(blob.cx + d, blob.cy)) buf[blob.cy * stride + (blob.cx + d)] = COLOR_BLOB;
-      if (inBounds(blob.cx, blob.cy + d)) buf[(blob.cy + d) * stride + blob.cx] = COLOR_BLOB;
-    }
-  }
-}
-
 void Vision::errorLoop() {
   while (true) {
     digitalWrite(LED_GPIO_NUM, LOW);
@@ -379,10 +344,14 @@ VisionData Vision::buildVisionData(const Blob &largest) {
     int roi_h = MIN(MAX_H - roi_y, largest.h + 2 * ROI_PADDING);
 
     tracking_roi = {roi_x, roi_y, roi_w, roi_h};
+
     target_locked = true;
 
-    vdata.cx = (uint16_t)roi_x;
-    vdata.cy = (uint16_t)roi_y;
+    // NOTE: cx/cy report the blob's true centroid (from findLargestBlob),
+    // not the padded tracking ROI's top-left corner. w/h remain the ROI's
+    // padded box dimensions, used by the base station for display only.
+    vdata.cx = (uint16_t)largest.cx;
+    vdata.cy = (uint16_t)largest.cy;
     vdata.w  = (uint16_t)roi_w;
     vdata.h  = (uint16_t)roi_h;
   } else {
@@ -394,7 +363,6 @@ VisionData Vision::buildVisionData(const Blob &largest) {
     vdata.w  = 0;
     vdata.h  = 0;
   }
-
   return vdata;
 }
 
