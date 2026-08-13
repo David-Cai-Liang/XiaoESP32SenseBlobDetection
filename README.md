@@ -19,6 +19,7 @@ telemetry (and optionally annotated JPEG video) over USB.
   the ESP-FLY firmware/hardware stack. See [IMU implementations](#imu-implementations-future)
   below.
   - Note: You cannot use the SD card and IMU at the same time because GPIO 8 is used by both.
+- Current CAD Model: https://cad.onshape.com/documents/6abb47ea8df48ed88ff41eff/w/fc873cead17ca65b0af647cb/e/1d23eafa7f8f630fb687ec6b
 ---
 
 ### Repository layout
