@@ -26,6 +26,7 @@ const int MOTOR_M4_FL = 1; // Front Left  (M4) -> Pin 1 (Orange Wire)
 const int YAW_DEADZONE_HALF_PX = 40;     // half-width of the 40px-wide deadzone
 const int YAW_GAIN = 1;                  // motor power added per pixel of x error
 const int MOTOR_MAX = 255;               // analogWrite() PWM ceiling (8-bit default)
+const int DEFAULT_POWER = 80;
 
 // REPLACE WITH YOUR BASE STATION MAC ADDRESS
 uint8_t baseStationAddress[] = {0x30, 0x30, 0xF9, 0x17, 0xFB, 0x8C};
@@ -134,18 +135,24 @@ void loop() {
   newControlAvailable = false;
 
   // Same watchdog as manual mode: if the base station link itself has gone
-  // stale, stay at zero rather than continuing to chase a possibly-stale target.
-  bool target_visible = (vData.w > 0 && vData.h > 0);
-  if (!stale && target_visible) {
-    int center_x = MAX_W / 2;                 // 320 / 2 = 160
-    int error_x  = (int)vData.cx - center_x;   // + => target is right of center
+  // stale, stay at zero rather than continuing to fly blind.
+  if (!stale) {
+    // Fly forward by default; turning is done by decreasing power to one
+    // of the two rear motors, not by adding power to the other.
+    m2 = m3 = DEFAULT_POWER;
 
-    if (abs(error_x) > YAW_DEADZONE_HALF_PX) {
-      int correction = (abs(error_x) - YAW_DEADZONE_HALF_PX) * YAW_GAIN;
-      if (error_x > 0) {
-        m2 = correction; // target right of center -> yaw right (mirrors 'D' key -> M2 Rear Right)
-      } else {
-        m3 = correction; // target left of center  -> yaw left  (mirrors 'A' key -> M3 Rear Left)
+    bool target_visible = (vData.w > 0 && vData.h > 0);
+    if (target_visible) {
+      int center_x = MAX_W / 2;                 // 320 / 2 = 160
+      int error_x  = (int)vData.cx - center_x;   // + => target is right of center
+
+      if (abs(error_x) > YAW_DEADZONE_HALF_PX) {
+        int correction = (abs(error_x) - YAW_DEADZONE_HALF_PX) * YAW_GAIN;
+        if (error_x > 0) {
+          m3 -= correction; // target right of center -> yaw right by cutting M3 (Rear Left)
+        } else {
+          m2 -= correction; // target left of center  -> yaw left  by cutting M2 (Rear Right)
+        }
       }
     }
   }
@@ -159,7 +166,7 @@ void loop() {
   Serial.printf("[MOTORS] M1: %d | M2: %d | M3: %d | M4: %d\n", m1, m2, m3, m4);
 
   analogWrite(MOTOR_M1_FR, m1);
-  analogWrite(MOTOR_M2_RR, m2);
+  analogWrite(MOTOR_M2_RR, m2); 
   analogWrite(MOTOR_M3_RL, m3);
   analogWrite(MOTOR_M4_FL, m4);
 
