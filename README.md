@@ -8,7 +8,7 @@ telemetry (and optionally annotated JPEG video) over USB.
 ### Hardware
 
 - Board: [Xiao ESP32-S3 Sense](https://www.seeedstudio.com/XIAO-ESP32S3-Sense-p-5639.html)
-- Camera sensor: [OV3660](https://datasheet.iiic.cc/datasheets-0/omnivision_technologies/OV03660-A51A.pdf) (default sensor shipped with the board)
+- Camera sensor: [OV3660](https://datasheet.iiic.cc/datasheets-0/omnivision_technologies/OV03660-A51A.pdf) (default sensor shipped with the board, 65 degree FOV)
 - PSRAM is **required** — the camera frame buffer lives in PSRAM; everything else
   (mask buffer, flood-fill stack, threshold LUT) lives in internal SRAM. See
   [Memory layout](#memory-layout) below.
