@@ -41,19 +41,19 @@ def on_release(key):
 
 
 def compute_motors():
-    m1, m2, m3, m4 = 10, 0, 0, 0
+    m1, m2, m3, m4 = 0, 20, 0, 0
 
     if "w" in active_keys:
-        m2 += 50
-        m3 += 50
-    if "a" in active_keys:
-        m3 += 50
-    if "d" in active_keys:
-        m2 += 50
-    if "q" in active_keys:
-        m4 += 50
-    if "e" in active_keys:
         m1 += 50
+        m4 += 50
+    if "a" in active_keys:
+        m4 += 50
+    if "d" in active_keys:
+        m1 += 50
+    if "q" in active_keys:
+        m3 += 50
+    if "e" in active_keys:
+        m2 += 50
 
     return [m1, m2, m3, m4]
 
@@ -74,7 +74,7 @@ def main():
     listener.start()
 
     print("Control & Benchmark Active")
-    print("Controls: Hold 'W' (M1+M2=25) | 'A' (+M1=25) | 'D' (+M2=25) | 'Q' (M3=25) | 'E' (M4=25)")
+    print("Controls: Hold 'W' (Forward) | 'A' (Left) | 'D' (Right) | 'Q' (Down) | 'E' (Up)")
     print("Press Ctrl+C to quit\n\n")
 
     buffer = bytearray()

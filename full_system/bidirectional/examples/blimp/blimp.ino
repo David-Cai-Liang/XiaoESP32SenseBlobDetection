@@ -18,7 +18,7 @@ const int MOTOR_M4_FL = 1; // Front Left  (M4) -> Pin 1 (Orange Wire)
 //                      incoming manual stick input is ignored
 #define MODE_MANUAL       0
 #define MODE_PROPORTIONAL 1
-#define CONTROL_MODE MODE_PROPORTIONAL   // <-- change this + reflash to switch modes
+#define CONTROL_MODE MODE_MANUAL   // <-- change this + reflash to switch modes
 
 // Yaw controller tuning
 // Deadzone is a 40x40 px box centered on the frame; only the x-extent (+/-20px)
