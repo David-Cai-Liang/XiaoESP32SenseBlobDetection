@@ -20,14 +20,26 @@ CONTROL_HEADER = b"\x00\xBB\x66\xFF"
 PAYLOAD_SIZE = 24  # 4x uint16 (8B) + 4x float (16B)
 TOTAL_FRAME_SIZE = 4 + PAYLOAD_SIZE + 2  # 30 Bytes Total Frame
 
+# Control modes (must match blimp.ino's MODE_MANUAL / MODE_PROPORTIONAL)
+MODE_MANUAL = 0
+MODE_PROPORTIONAL = 1
+MODE_NAMES = {MODE_MANUAL: "MANUAL", MODE_PROPORTIONAL: "AUTONOMOUS (yaw-only)"}
+
 # Keyboard state management
 active_keys = set()
+current_mode = MODE_MANUAL  # start safe: manual control until the pilot opts in
 
 
 def on_press(key):
+    global current_mode
     try:
         if key.char:
-            active_keys.add(key.char.lower())
+            c = key.char.lower()
+            # Toggle mode on the press edge only, so holding 'm' (or OS key-repeat)
+            # doesn't rapidly flip modes back and forth.
+            if c == "m" and c not in active_keys:
+                current_mode = MODE_PROPORTIONAL if current_mode == MODE_MANUAL else MODE_MANUAL
+            active_keys.add(c)
     except AttributeError:
         pass
 
@@ -58,6 +70,11 @@ def compute_motors():
     return [m1, m2, m3, m4]
 
 
+def pack_control(motors, mode):
+    # 4x int16 motor values + 1x uint8 mode flag, matching blimp.ino's ControlPacket
+    return struct.pack("<4hB", *motors, mode)
+
+
 def main():
     try:
         ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.01)
@@ -74,7 +91,8 @@ def main():
     listener.start()
 
     print("Control & Benchmark Active")
-    print("Controls: Hold 'W' (Forward) | 'A' (Left) | 'D' (Right) | 'Q' (Down) | 'E' (Up)")
+    print("Controls: Hold 'W' (M1+M2=25) | 'A' (+M1=25) | 'D' (+M2=25) | 'Q' (M3=25) | 'E' (M4=25)")
+    print("Press 'M' to toggle MANUAL <-> AUTONOMOUS (yaw-only) mode")
     print("Press Ctrl+C to quit\n\n")
 
     buffer = bytearray()
@@ -95,7 +113,7 @@ def main():
             if now - last_control_time >= 0.05:
                 last_control_time = now
                 motors = compute_motors()
-                payload = struct.pack("<4h", *motors)
+                payload = pack_control(motors, current_mode)
                 ser.write(CONTROL_HEADER + payload)
 
             # 2. Read all available Serial bytes directly into buffer
@@ -135,7 +153,7 @@ def main():
 
                         # Terminal display
                         sys.stdout.write(
-                            f"\r\033[K[STATUS] Motors: {curr_motors} || "
+                            f"\r\033[K[STATUS] Mode: {MODE_NAMES[current_mode]:<21} Motors: {curr_motors} || "
                             f"Vision: CX:{cx:3d} CY:{cy:3d} W:{w:3d} H:{h:3d} || "
                             f"IMU: AX:{ax:5.1f} AY:{ay:5.1f} AZ:{az:5.1f}\n"
                             f"\r\033[K[LATENCY] Delta: {delta_ms:5.1f}ms | Avg: {avg_dt:5.1f}ms | "
@@ -149,7 +167,9 @@ def main():
 
     except KeyboardInterrupt:
         motors = [0,0,0,0]
-        payload = struct.pack("<4h", *motors)
+        # Force MANUAL mode here so a zero ControlPacket actually zeroes thrust,
+        # even if AUTONOMOUS mode was active when Ctrl+C was hit.
+        payload = pack_control(motors, MODE_MANUAL)
         ser.write(CONTROL_HEADER + payload)
         print("\n\n\n--- Benchmark Summary ---")
         if frame_deltas:
@@ -163,7 +183,7 @@ def main():
         print("Exiting...")
     finally:
         motors = [0,0,0,0]
-        payload = struct.pack("<4h", *motors)
+        payload = pack_control(motors, MODE_MANUAL)
         ser.write(CONTROL_HEADER + payload)
         for _ in range(5):
             ser.write(CONTROL_HEADER + payload)

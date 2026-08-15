@@ -88,8 +88,8 @@ private:
   uint32_t *stack_buf;
 
   static constexpr LabThreshold THRESHOLD_BLIMP = {20, 60, 10, 50, 1, 30};
-  static constexpr uint32_t AREA_THRESHOLD_LOCKED = 30;
-  static constexpr uint32_t AREA_THRESHOLD_SEARCH = 60;
+  static constexpr uint32_t AREA_THRESHOLD_LOCKED = 50;
+  static constexpr uint32_t AREA_THRESHOLD_SEARCH = 100;
   static constexpr int ROI_PADDING = 30;
   static constexpr int SCAN_STEP = 1;
 };
