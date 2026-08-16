@@ -147,8 +147,11 @@ void loop() {
       // of the two rear motors, not by adding power to the other.
       m1 = m4 = DEFAULT_FORWARD_POWER;
       m2 = DEFAULT_UPWARD_POWER;
-
+      // TODO: update closeEnough to reasonable values; maybe create a guidance.cpp/.h
+      bool closeEnough = (vData.w > 0 && vData.h > 0);
       bool target_visible = (vData.w > 0 && vData.h > 0);
+      // int[] waypoint_list = ...;
+      // int waypoint_index = ...;
       if (target_visible) {
         int center_x = MAX_W / 2;                 // 320 / 2 = 160
         int error_x  = (int)vData.cx - center_x;   // + => target is right of center
@@ -161,6 +164,19 @@ void loop() {
             m1 -= correction; // target left of center  -> yaw left  by cutting M2 (Rear Right)
           }
         }
+      }
+      /*Go into IMU-Based Waypoint Mode */
+      else if closeEnough {
+        /*
+        closeEnough = false;
+        Turn using the rotation data for next waypoint: waypoint_list[next]
+        next=(next+1)%waypoint_num
+        */
+      }
+      else {
+        /*
+        start wiggle search
+        */
       }
     }
   }
