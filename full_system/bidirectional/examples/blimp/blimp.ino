@@ -34,6 +34,12 @@ const int MOTOR_MAX = 255;               // analogWrite() PWM ceiling (8-bit def
 const int DEFAULT_FORWARD_POWER = 80;
 const int DEFAULT_UPWARD_POWER = 20;
 
+// const float TURN_RATE_SETTLE
+// const float TURN_DEADBAND_DEG
+// const float TURN_MAX_POWER
+// const float TURN_KD
+// const float TURN_KP
+
 // REPLACE WITH YOUR BASE STATION MAC ADDRESS
 uint8_t baseStationAddress[] = {0x30, 0x30, 0xF9, 0x17, 0xFB, 0x8C};
 
@@ -139,6 +145,9 @@ void loop() {
   } else { // MODE_PROPORTIONAL
     // Manual stick input is ignored in this mode.
     newControlAvailable = false;
+    
+    // waypoint[] waypoint_list = ...;
+    // int waypoint_index = ...;
 
     // Same watchdog as manual mode: if the base station link itself has gone
     // stale, stay at zero rather than continuing to fly blind.
@@ -149,10 +158,9 @@ void loop() {
       m2 = DEFAULT_UPWARD_POWER;
       // TODO: update closeEnough to reasonable values; maybe create a guidance.cpp/.h
       bool target_visible = (vData.w > 0 && vData.h > 0);
+
       // bool closeEnough = (vData.w > 180 && vData.h > 180);
-      // waypoint[] waypoint_list = ...;
-      // int waypoint_index = ...;
-      // float distance_traveled = ...;
+
       if (!closeEnough && target_visible) {
         int center_x = MAX_W / 2;                 // 320 / 2 = 160
         int error_x  = (int)vData.cx - center_x;   // + => target is right of center
@@ -197,7 +205,7 @@ void loop() {
       }
       else {
         // may add wiggle search if tracking is not good enough
-        // As distance traveled increases, wiggle angle to increase proportionally.
+        // As distance traveled from last waypoint increases, the wiggle angle should increase proportionally.
       }
     }
     */
