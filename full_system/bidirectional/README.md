@@ -75,6 +75,8 @@ typedef struct __attribute__((packed)) {
 
 Each side's `esp_now_add_peer` must point at the other's MAC address — set these in both `.ino` files before flashing:
 
+Both sketches now check `esp_now_send`'s return value (whether the packet was successfully queued) and register an `OnDataSent` callback for the async `esp_now_send_status_t` (whether it was actually ACKed over the air), logging a message on either kind of failure instead of failing silently.
+
 - `base_station.ino` → `blimpAddress[]`
 - `blimp.ino` → `baseStationAddress[]`
 
@@ -128,7 +130,7 @@ Edit `SERIAL_PORT` at the top of `base_station.py` first (e.g. `COM9` on Windows
 | `M` | Toggle control mode: `MANUAL` ⇄ `AUTONOMOUS` (yaw-only, see below) |
 | `Ctrl+C` | Stop — sends an all-zero, forced-`MANUAL` motor command and exits |
 
-M2 carries a constant idle offset of `20` even with no keys held (see `compute_motors()`); every other motor idles at `0`. `M` toggles on the key-down edge only (holding it or OS key-repeat won't rapidly flip modes), and the script starts in `MANUAL` every time it launches, regardless of what mode the blimp was last left in.
+M2 carries a constant idle offset  even with no keys held (see `compute_motors()`); every other motor idles at `0`. `M` toggles on the key-down edge only (holding it or OS key-repeat won't rapidly flip modes), and the script starts in `MANUAL` every time it launches, regardless of what mode the blimp was last left in.
 
 The terminal shows live commanded motor state and control mode, the blimp's tracked vision blob (center/box), IMU readings, the blimp's actual motor outputs (unpacked from telemetry into `actual_motors`), and round-trip telemetry latency/FPS. On exit it prints a benchmark summary (frame count, average delta, jitter, throughput).
 
@@ -190,7 +192,7 @@ Note the 1000 ms timeout is fairly loose relative to the ~20 Hz (50 ms) control 
 
 ## Known limitations / suggested hardening
 
-- `esp_now_send` calls in both sketches don't check their return status, so a failed send is currently silent.
 - `CONTROL_TIMEOUT_MS` (1000 ms) is generous compared to the control loop's ~50 ms cadence; a tighter timeout would reduce how long the blimp can drift on a stale command before self-stopping.
 - The proportional yaw controller's turn direction (`M2` vs `M3` for a given error sign) is inferred from the manual key bindings, not confirmed in flight — verify and flip if needed.
 - The 40×40 px deadzone and `YAW_GAIN` of 1 are untuned starting values; expect to adjust both once you see how the blimp actually responds.
+- On `base_station.ino`, `esp_now_send`'s return value and the `OnDataSent` delivery-status callback are both now logged over the same `Serial` connection used for the framed telemetry/control protocol to `base_station.py`. `base_station.py` re-syncs on the next telemetry header, so a stray debug line is tolerated (a few bytes are dropped, not a crash), but it does briefly interrupt the binary stream — worth moving to a second UART or removing the prints if you see it cause noticeable frame loss.
