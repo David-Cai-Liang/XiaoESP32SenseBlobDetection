@@ -28,6 +28,7 @@ A vision-tracking, IMU-stabilized blimp controlled wirelessly from a keyboard, b
 | `blimp.ino` | Blimp ESP32 | Vision + IMU sensor loop, motor output, ESP-NOW telemetry/control |
 | `Vision.h` / `Vision.cpp` | Blimp ESP32 | OV-series camera capture, Lab-color threshold blob tracking, ROI locking |
 | `IMU.h` / `IMU.cpp` | Blimp ESP32 | MPU6050 accelerometer/gyro readout |
+| `motor.h` / `motor.cpp` | Blimp ESP32 | Defines `MotorData` (the actual, post-constrain M1–M4 outputs) and a small constructor helper, shared by `TelemetryPacket` |
 | `base_station.ino` | Base station ESP32 | Serial ⇄ ESP-NOW protocol bridge (no processing) |
 | `base_station.py` | PC | Keyboard control, serial framing, live telemetry/latency dashboard |
 
@@ -58,6 +59,7 @@ Two fixed-size, `packed` structs are exchanged directly as ESP-NOW payloads:
 typedef struct __attribute__((packed)) {
   VisionData vision; // cx, cy, w, h (4x uint16_t) — blob centroid + ROI box size
   IMUData imu;       // ax, ay, az, tz (4x float)  — accel XYZ + gyro Z
+  MotorData motors;  // m1, m2, m3, m4 (4x int16_t) — actual, post-constrain motor outputs
 } TelemetryPacket;
 
 // Base station -> Blimp
@@ -69,6 +71,8 @@ typedef struct __attribute__((packed)) {
 
 `vision.cx`/`vision.cy` are the tracked blob's true centroid in frame coordinates (0–320, 0–240 on the QVGA camera); `vision.w`/`vision.h` are the padded tracking ROI's dimensions, useful for display but not for locating the target itself.
 
+`telemetry.motors` (defined in `motor.h`/`motor.cpp` as `MotorData`) carries the *actual* M1–M4 values just written to `analogWrite()` for that loop iteration — after mode selection, the yaw controller (if active), and the `[0, 255]` clamp. This is filled in and the telemetry packet is sent only after motor outputs are computed each loop, so it's never a stale value from the previous iteration. It's distinct from the base station's `ControlPacket.motors`, which is the last *commanded* value from the PC and can differ from what's actually driving the motors (e.g. in `MODE_PROPORTIONAL`, where manual stick input is ignored, or when the watchdog has forced zero). Having the real output on hand is useful for autonomous operation downstream — e.g. logging, closed-loop tuning, or a PC-side controller that needs to know actual thrust rather than last-sent thrust.
+
 Each side's `esp_now_add_peer` must point at the other's MAC address — set these in both `.ino` files before flashing:
 
 - `base_station.ino` → `blimpAddress[]`
@@ -79,12 +83,14 @@ Each side's `esp_now_add_peer` must point at the other's MAC address — set the
 The base station re-frames each `TelemetryPacket` for transport over serial, and unwraps `ControlPacket`s the same way:
 
 ```
-Telemetry (Base Station -> PC), 30 bytes total:
-  [ 4B header: 00 AA 55 FF ] [ 24B payload: 4x uint16 + 4x float ] [ 2B footer: EE FF ]
+Telemetry (Base Station -> PC), 38 bytes total:
+  [ 4B header: 00 AA 55 FF ] [ 32B payload: 4x uint16 + 4x float + 4x int16 ] [ 2B footer: EE FF ]
 
 Control (PC -> Base Station), 13 bytes total:
   [ 4B header: 00 BB 66 FF ] [ 9B payload: 4x int16 motor values + 1x uint8 mode ]
 ```
+
+The 32-byte telemetry payload is `cx, cy, w, h` (4x `uint16`), `ax, ay, az, tz` (4x `float`), then `m1, m2, m3, m4` — the blimp's actual motor outputs (4x `int16`).
 
 `base_station.py` re-syncs to the header on every parse pass, so it tolerates dropped/partial bytes on the serial line.
 
@@ -122,9 +128,11 @@ Edit `SERIAL_PORT` at the top of `base_station.py` first (e.g. `COM9` on Windows
 | `M` | Toggle control mode: `MANUAL` ⇄ `AUTONOMOUS` (yaw-only, see below) |
 | `Ctrl+C` | Stop — sends an all-zero, forced-`MANUAL` motor command and exits |
 
-M1 carries a constant idle offset of `10` even with no keys held (see `compute_motors()`); every other motor idles at `0`. `M` toggles on the key-down edge only (holding it or OS key-repeat won't rapidly flip modes), and the script starts in `MANUAL` every time it launches, regardless of what mode the blimp was last left in.
+M2 carries a constant idle offset of `20` even with no keys held (see `compute_motors()`); every other motor idles at `0`. `M` toggles on the key-down edge only (holding it or OS key-repeat won't rapidly flip modes), and the script starts in `MANUAL` every time it launches, regardless of what mode the blimp was last left in.
 
-The terminal shows live motor state and control mode, the blimp's tracked vision blob (center/box), IMU readings, and round-trip telemetry latency/FPS. On exit it prints a benchmark summary (frame count, average delta, jitter, throughput).
+The terminal shows live commanded motor state and control mode, the blimp's tracked vision blob (center/box), IMU readings, the blimp's actual motor outputs (unpacked from telemetry into `actual_motors`), and round-trip telemetry latency/FPS. On exit it prints a benchmark summary (frame count, average delta, jitter, throughput).
+
+`actual_motors` (a `[m1, m2, m3, m4]` list, parsed each frame from the new `TelemetryPacket` fields) reflects what the blimp is really doing, as opposed to `curr_motors`/`compute_motors()`, which is only what the PC last *commanded*. The two will diverge whenever `MODE_PROPORTIONAL` is active (manual input is ignored on the blimp side) or the blimp's own watchdog has zeroed the motors — exactly the cases where an autonomous or logging consumer of this script would want the real value.
 
 ## Control modes (switch live from the keyboard)
 

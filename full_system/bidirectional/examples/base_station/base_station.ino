@@ -12,6 +12,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
   uint16_t cx, cy, w, h;
   float ax, ay, az, tz;
+  int16_t m1, m2, m3, m4; // actual, post-constrain motor outputs from the blimp
 } TelemetryPacket;
 
 // Framed Protocol Markers
@@ -32,6 +33,13 @@ void OnDataRecv(const esp_now_recv_info_t *esp_now_info, const uint8_t *incoming
   }
 }
 
+// Callback when a relayed ControlPacket is sent to the Blimp
+void OnDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
+  if (status != ESP_NOW_SEND_SUCCESS) {
+    Serial.println("[ESP-NOW] Control send failed (no ACK from blimp)");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   WiFi.mode(WIFI_STA);
@@ -39,6 +47,7 @@ void setup() {
   if (esp_now_init() != ESP_OK) return;
 
   esp_now_register_recv_cb(OnDataRecv);
+  esp_now_register_send_cb(OnDataSent);
 
   memset(&peerInfo, 0, sizeof(peerInfo));
 
@@ -67,7 +76,10 @@ void loop() {
       if (memcmp(header, CTRL_HEADER, 4) == 0) {
         ControlPacket control;
         Serial.readBytes((char *)&control, sizeof(ControlPacket));
-        esp_now_send(blimpAddress, (uint8_t *)&control, sizeof(control));
+        esp_err_t sendResult = esp_now_send(blimpAddress, (uint8_t *)&control, sizeof(control));
+        if (sendResult != ESP_OK) {
+          Serial.printf("[ESP-NOW] Control send failed to enqueue, err=%d\n", sendResult);
+        }
       }
     } else {
       Serial.read(); // Discard unaligned byte

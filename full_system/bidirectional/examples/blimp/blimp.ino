@@ -2,6 +2,7 @@
 #define sensor_t adafruit_sensor_t
 #include <IMU.h>
 #undef sensor_t
+#include "motor.h"
 #include <esp_now.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -40,6 +41,7 @@ uint8_t baseStationAddress[] = {0x30, 0x30, 0xF9, 0x17, 0xFB, 0x8C};
 typedef struct __attribute__((packed)) {
   VisionData vision; // cx, cy, w, h (4 x uint16_t)
   IMUData imu;       // ax, ay, az, tz (4 x float)
+  MotorData motors;  // actual, post-constrain M1-M4 outputs (4 x int16_t)
 } TelemetryPacket;
 
 // Motor control commands received from Base Station
@@ -55,12 +57,14 @@ IMU imu;
 ControlPacket incomingControl = {{0, 0, 0, 0}};
 volatile bool newControlAvailable = false;
 
-unsigned long lastRecvTime = 0;
+volatile unsigned long lastRecvTime = 0;
 const unsigned long CONTROL_TIMEOUT_MS = 1000;
 
 // Callback when telemetry is sent to Base Station
 void OnDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
-  // Optional: Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Telemetry Sent" : "Telemetry Send Fail");
+  if (status != ESP_NOW_SEND_SUCCESS) {
+    Serial.println("[ESP-NOW] Telemetry send failed (no ACK from base station)");
+  }
 }
 
 // Callback when motor controls are received from Base Station
@@ -118,16 +122,9 @@ void loop() {
 
   IMUData iData = imu.readData();
 
-  // 2. Transmit Telemetry Packet to Base Station
-  TelemetryPacket telemetry;
-  telemetry.vision = vData;
-  telemetry.imu = iData;
-
-  esp_now_send(baseStationAddress, (uint8_t *)&telemetry, sizeof(telemetry));
-
   bool stale = (millis() - lastRecvTime > CONTROL_TIMEOUT_MS);
 
-  // 3. Compute Motor Outputs for the active control mode
+  // 2. Compute Motor Outputs for the active control mode
   int16_t m1 = 0, m2 = 0, m3 = 0, m4 = 0;
 
   if (currentMode == MODE_MANUAL) {
@@ -172,6 +169,18 @@ void loop() {
   m2 = constrain(m2, 0, MOTOR_MAX);
   m3 = constrain(m3, 0, MOTOR_MAX);
   m4 = constrain(m4, 0, MOTOR_MAX);
+
+  // 3. Transmit Telemetry Packet to Base Station, now that the actual
+  // (post-constrain) motor outputs for this loop iteration are known.
+  TelemetryPacket telemetry;
+  telemetry.vision = vData;
+  telemetry.imu = iData;
+  telemetry.motors = buildMotorData(m1, m2, m3, m4);
+
+  esp_err_t sendResult = esp_now_send(baseStationAddress, (uint8_t *)&telemetry, sizeof(telemetry));
+  if (sendResult != ESP_OK) {
+    Serial.printf("[ESP-NOW] Telemetry send failed to enqueue, err=%d\n", sendResult);
+  }
 
   Serial.printf("[MODE] %s | [MOTORS] M1: %d | M2: %d | M3: %d | M4: %d\n",
                 currentMode == MODE_MANUAL ? "MANUAL" : "PROPORTIONAL", m1, m2, m3, m4);

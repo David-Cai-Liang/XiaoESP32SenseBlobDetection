@@ -17,7 +17,7 @@ TELEMETRY_HEADER = b"\x00\xAA\x55\xFF"
 TELEMETRY_FOOTER = b"\xEE\xFF"
 CONTROL_HEADER = b"\x00\xBB\x66\xFF"
 
-PAYLOAD_SIZE = 24  # 4x uint16 (8B) + 4x float (16B)
+PAYLOAD_SIZE = 32  # 4x uint16 (8B) + 4x float (16B) + 4x int16 actual motors (8B)
 TOTAL_FRAME_SIZE = 4 + PAYLOAD_SIZE + 2  # 30 Bytes Total Frame
 
 # Control modes (must match blimp.ino's MODE_MANUAL / MODE_PROPORTIONAL)
@@ -110,10 +110,14 @@ def main():
         while True:
             # 1. Transmit Motor Control Commands (~20 Hz)
             now = time.perf_counter()
+            if mode = "MANUAL":
+                command_motors = compute_motors()
+            else:
+                command_motors = [0,0,0,0]
+
             if now - last_control_time >= 0.05:
                 last_control_time = now
-                motors = compute_motors()
-                payload = pack_control(motors, current_mode)
+                payload = pack_control(command_motors, current_mode)
                 ser.write(CONTROL_HEADER + payload)
 
             # 2. Read all available Serial bytes directly into buffer
@@ -148,14 +152,17 @@ def main():
                         avg_dt = sum(frame_deltas) / len(frame_deltas) if frame_deltas else 0.0
                         fps = 1000.0 / avg_dt if avg_dt > 0 else 0.0
 
-                        cx, cy, w, h, ax, ay, az, tz = struct.unpack("<4H4f", raw_payload)
-                        curr_motors = compute_motors()
+                        cx, cy, w, h, ax, ay, az, tz, m1, m2, m3, m4 = struct.unpack("<4H4f4h", raw_payload)
+                        # actual_motors is the feedback from the last command;
+                        # command_motors is the new command if it exists
+                        actual_motors = [m1, m2, m3, m4]
 
                         # Terminal display
                         sys.stdout.write(
-                            f"\r\033[K[STATUS] Mode: {MODE_NAMES[current_mode]:<21} Motors: {curr_motors} || "
+                            f"\r\033[K[TELEMETRY] Motors: {actual_motors} || "
                             f"Vision: CX:{cx:3d} CY:{cy:3d} W:{w:3d} H:{h:3d} || "
                             f"IMU: AX:{ax:5.1f} AY:{ay:5.1f} AZ:{az:5.1f}\n"
+                            f"\r\033[K[COMMAND] Mode: {MODE_NAMES[current_mode]:<21} || Motors: {command_motors}\n"
                             f"\r\033[K[LATENCY] Delta: {delta_ms:5.1f}ms | Avg: {avg_dt:5.1f}ms | "
                             f"Rate: {fps:4.1f} FPS | Queue: {ser.in_waiting}B\033[A"
                         )
