@@ -148,11 +148,12 @@ void loop() {
       m1 = m4 = DEFAULT_FORWARD_POWER;
       m2 = DEFAULT_UPWARD_POWER;
       // TODO: update closeEnough to reasonable values; maybe create a guidance.cpp/.h
-      bool closeEnough = (vData.w > 180 && vData.h > 180);
       bool target_visible = (vData.w > 0 && vData.h > 0);
+      // bool closeEnough = (vData.w > 180 && vData.h > 180);
       // waypoint[] waypoint_list = ...;
       // int waypoint_index = ...;
-      if (target_visible & !closeEnough) {
+      // float distance_traveled = ...;
+      if (!closeEnough && target_visible) {
         int center_x = MAX_W / 2;                 // 320 / 2 = 160
         int error_x  = (int)vData.cx - center_x;   // + => target is right of center
 
@@ -165,20 +166,41 @@ void loop() {
           }
         }
       }
-      /*Go into IMU-Based Waypoint Mode */
-      else if closeEnough {
-        /*
+      /*Go into IMU-Based Waypoint Mode 
+      else if (closeEnough) {
         Turn using the rotation data for next waypoint: waypoint_list[next]
         next=(next+1)%waypoint_num
-        if turnComplete closeEnough = false;
-        */
+        float turnedSoFar = 0;
+        while (!stale && abs(turnedSoFar - waypoint_list[next].angle) > TURN_DEADBAND_DEG) {
+          stale = (millis() - lastRecvTime > CONTROL_TIMEOUT_MS);
+          float rate = imu.readData().tz - gyroBiasDegPerSec;
+          float error = wrap180(waypoint_list[next].angle - turnedSoFar);
+
+            // Preliminary PID
+            float turnPower = TURN_KP * error - TURN_KD * yawRate;
+            turnPower = constrain(turnPower, -TURN_MAX_POWER, TURN_MAX_POWER);
+
+            if (turnPower >= 0) {        // need to yaw right: m1 up, m4 down
+              m1 = constrain((int)turnPower, 0, MOTOR_MAX);
+              m4 = 0;
+            } else {                     // need to yaw left: m4 up, m1 down
+              m4 = constrain((int)-turnPower, 0, MOTOR_MAX);
+              m1 = 0;
+            }
+            m2 = 0; m3 = 0;  // no lift/forward thrust during a turn — minimizes drift off-station
+
+          if (abs(error) <= TURN_DEADBAND_DEG && abs(rate) <= TURN_RATE_SETTLE) {
+            closeEnough = false;
+            distanceTraveled = 0;
+        }
+        }
       }
       else {
-        /*
-        start wiggle search
-        */
+        // may add wiggle search if tracking is not good enough
+        // As distance traveled increases, wiggle angle to increase proportionally.
       }
     }
+    */
   }
 
   m1 = constrain(m1, 0, MOTOR_MAX);
