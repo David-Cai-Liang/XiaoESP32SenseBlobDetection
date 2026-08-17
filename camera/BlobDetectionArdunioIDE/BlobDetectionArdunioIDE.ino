@@ -7,7 +7,7 @@
 
 // Stream modes: 1 = full JPEG frame + Telemetry, 0 = High-rate Telemetry header only
 #define DEBUG_STREAM 1
-#define MASKED_DEBUG_STREAM 1
+#define MASKED_DEBUG_STREAM 0
 
 // --- Hardware Pins ---
 #define LED_GPIO_NUM   21 // XIAO ESP32S3 User LED

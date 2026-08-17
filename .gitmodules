@@ -1,0 +1,3 @@
+[submodule "full_system/ESP-FLY-BLIMP-V2"]
+	path = full_system/ESP-FLY-BLIMP-V2
+	url = git@github.com:David-Cai-Liang/ESP-FLY-BLIMP-V2.git
