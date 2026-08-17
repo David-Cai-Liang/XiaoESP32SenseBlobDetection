@@ -2,7 +2,7 @@ import os
 import struct
 import sys
 import time
-from pynput import keyboard
+import pygame
 import serial
 
 # Enable VT100 ANSI escape sequence support on Windows terminal
@@ -25,31 +25,77 @@ MODE_MANUAL = 0
 MODE_PROPORTIONAL = 1
 MODE_NAMES = {MODE_MANUAL: "MANUAL", MODE_PROPORTIONAL: "AUTONOMOUS (yaw-only)"}
 
+# Xbox controller tuning
+CONTROLLER_MAX_POWER = 100      # absolute cap on any motor value from the controller
+CONTROLLER_DEADZONE = 0.15      # ignore stick noise near center
+HOVER_BASELINE = 20             # matches the keyboard path's idle m2 value
+
+# Axis indices are for the common SDL2/XInput mapping (Xbox 360 / Xbox One
+# controllers on Windows & most Linux setups via pygame 2.x). If your sticks
+# don't move the right motors, run `python base_station.py --calibrate`
+# to print live axis values and adjust the indices below.
+AXIS_LEFT_X = 0
+AXIS_LEFT_Y = 1
+AXIS_RIGHT_Y = 4
+BUTTON_MODE_TOGGLE = 0  # "A" button
+
+# Maps pygame key constants to the same single-char tokens the rest of the
+# code (compute_motors, MODE toggle, etc.) already expects.
+KEY_MAP = {
+    pygame.K_w: "w",
+    pygame.K_a: "a",
+    pygame.K_d: "d",
+    pygame.K_q: "q",
+    pygame.K_e: "e",
+    pygame.K_m: "m",
+}
+
 # Keyboard state management
 active_keys = set()
 current_mode = MODE_MANUAL  # start safe: manual control until the pilot opts in
 
+# Controller state
+joystick = None
+controller_button_prev = set()
 
-def on_press(key):
+
+def init_keyboard_window():
+    """
+    pygame.key needs a display surface with window focus to receive keyboard
+    events, so we open a small control window. Click into it to give it focus.
+    """
+    win = pygame.display.set_mode((420, 160))
+    pygame.display.set_caption("Base Station Controls (click here for keyboard focus)")
+    pygame.key.set_repeat(0)  # disabled: we want press edges, not OS key-repeat
+    return win
+
+
+def process_keyboard_events():
+    """
+    Poll pygame's event queue and update active_keys / current_mode.
+    Returns False if the window was closed (used as a shutdown signal).
+    """
     global current_mode
-    try:
-        if key.char:
-            c = key.char.lower()
-            # Toggle mode on the press edge only, so holding 'm' (or OS key-repeat)
-            # doesn't rapidly flip modes back and forth.
-            if c == "m" and c not in active_keys:
-                current_mode = MODE_PROPORTIONAL if current_mode == MODE_MANUAL else MODE_MANUAL
-            active_keys.add(c)
-    except AttributeError:
-        pass
 
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            return False
 
-def on_release(key):
-    try:
-        if key.char:
-            active_keys.discard(key.char.lower())
-    except AttributeError:
-        pass
+        elif event.type == pygame.KEYDOWN:
+            c = KEY_MAP.get(event.key)
+            if c is not None:
+                # KEYDOWN only fires once per physical press (repeat is
+                # disabled above), so this is naturally the press edge.
+                if c == "m":
+                    current_mode = MODE_PROPORTIONAL if current_mode == MODE_MANUAL else MODE_MANUAL
+                active_keys.add(c)
+
+        elif event.type == pygame.KEYUP:
+            c = KEY_MAP.get(event.key)
+            if c is not None:
+                active_keys.discard(c)
+
+    return True
 
 
 def compute_motors():
@@ -70,12 +116,104 @@ def compute_motors():
     return [m1, m2, m3, m4]
 
 
+def apply_deadzone(value, deadzone=CONTROLLER_DEADZONE):
+    """Zero out stick noise near center and rescale the remaining range to 0-1."""
+    if abs(value) < deadzone:
+        return 0.0
+    sign = 1.0 if value > 0 else -1.0
+    return sign * (abs(value) - deadzone) / (1.0 - deadzone)
+
+
+def init_controller():
+    """Attempt to detect and open an Xbox (or compatible) controller. Returns None if unavailable."""
+    pygame.joystick.init()
+
+    if pygame.joystick.get_count() == 0:
+        print("No controller detected — falling back to keyboard-only control.")
+        return None
+
+    js = pygame.joystick.Joystick(0)
+    js.init()
+    print(f"Controller connected: {js.get_name()}")
+    return js
+
+
+def compute_motors_from_controller(js):
+    """
+    Left stick Y  -> forward thrust on m1 + m4 (push up = forward)
+    Left stick X  -> steering, biases m1 vs m4 like the keyboard 'a'/'d' keys
+    Right stick Y -> lift on m2 + m3 relative to hover baseline (push up = more lift)
+    """
+    pygame.event.pump()
+
+    lx = apply_deadzone(js.get_axis(AXIS_LEFT_X))
+    ly = apply_deadzone(js.get_axis(AXIS_LEFT_Y))
+    ry = apply_deadzone(js.get_axis(AXIS_RIGHT_Y))
+
+    forward = max(0.0, -ly)  # pushing stick up is negative on the Y axis
+    turn = lx                # -1 (left) .. +1 (right)
+    vertical = -ry            # pushing stick up is negative on the Y axis
+
+    m1 = forward * CONTROLLER_MAX_POWER
+    m4 = forward * CONTROLLER_MAX_POWER
+
+    if turn > 0:      # steer right: boost m1
+        m1 += turn * CONTROLLER_MAX_POWER
+    elif turn < 0:     # steer left: boost m4
+        m4 += -turn * CONTROLLER_MAX_POWER
+
+    m1 = max(0, min(CONTROLLER_MAX_POWER, m1))
+    m4 = max(0, min(CONTROLLER_MAX_POWER, m4))
+
+    lift = HOVER_BASELINE + vertical * CONTROLLER_MAX_POWER
+    lift = max(0, min(CONTROLLER_MAX_POWER, lift))
+    m2 = m3 = lift
+
+    return [int(m1), int(m2), int(m3), int(m4)]
+
+
+def handle_controller_mode_toggle(js):
+    """Edge-detect the mode-toggle button so a held press doesn't rapidly flip modes."""
+    global current_mode, controller_button_prev
+
+    pressed_now = set()
+    for i in range(js.get_numbuttons()):
+        if js.get_button(i):
+            pressed_now.add(i)
+
+    if BUTTON_MODE_TOGGLE in pressed_now and BUTTON_MODE_TOGGLE not in controller_button_prev:
+        current_mode = MODE_PROPORTIONAL if current_mode == MODE_MANUAL else MODE_MANUAL
+
+    controller_button_prev = pressed_now
+
+
+def calibrate_controller():
+    """Utility mode: prints live axis/button values so you can confirm indices. Run with --calibrate."""
+    pygame.init()
+    js = init_controller()
+    if js is None:
+        sys.exit(1)
+    print("Move sticks / press buttons. Ctrl+C to quit.\n")
+    try:
+        while True:
+            pygame.event.pump()
+            axes = [round(js.get_axis(i), 2) for i in range(js.get_numaxes())]
+            buttons = [i for i in range(js.get_numbuttons()) if js.get_button(i)]
+            sys.stdout.write(f"\rAxes: {axes}  Buttons: {buttons}   \033[K")
+            sys.stdout.flush()
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print("\nDone.")
+
+
 def pack_control(motors, mode):
     # 4x int16 motor values + 1x uint8 mode flag, matching blimp.ino's ControlPacket
     return struct.pack("<4hB", *motors, mode)
 
 
 def main():
+    global joystick
+
     try:
         ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.01)
         print(f"Connected to Base Station on {SERIAL_PORT}")
@@ -86,14 +224,20 @@ def main():
     # Clear OS buffer queue lag on launch
     ser.reset_input_buffer()
 
-    # Start keyboard state listener
-    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-    listener.start()
+    # pygame powers both keyboard capture and the Xbox controller
+    pygame.init()
+    init_keyboard_window()
+
+    # Try to bring up an Xbox controller; keyboard still works either way
+    joystick = init_controller()
 
     print("Control & Benchmark Active")
     print("Controls: Hold 'W' (M1+M2=25) | 'A' (+M1=25) | 'D' (+M2=25) | 'Q' (M3=25) | 'E' (M4=25)")
     print("Press 'M' to toggle MANUAL <-> AUTONOMOUS (yaw-only) mode")
-    print("Press Ctrl+C to quit\n\n")
+    print("NOTE: click into the small 'Base Station Controls' window for keyboard input to register")
+    if joystick is not None:
+        print("Xbox controller: Left stick = forward/steer | Right stick Y = up/down | 'A' = toggle mode")
+    print("Press Ctrl+C, or close the control window, to quit\n\n")
 
     buffer = bytearray()
     last_control_time = 0
@@ -108,23 +252,31 @@ def main():
 
     try:
         while True:
-            # 1. Transmit Motor Control Commands (~20 Hz)
+            # 1. Poll the keyboard window; a closed window shuts things down cleanly
+            if not process_keyboard_events():
+                raise KeyboardInterrupt
+
+            # 2. Transmit Motor Control Commands (~20 Hz)
             now = time.perf_counter()
-            if mode = "MANUAL":
-                command_motors = compute_motors()
+            if current_mode == MODE_MANUAL:
+                if joystick is not None:
+                    handle_controller_mode_toggle(joystick)
+                    command_motors = compute_motors_from_controller(joystick)
+                else:
+                    command_motors = compute_motors()
             else:
-                command_motors = [0,0,0,0]
+                command_motors = [0, 0, 0, 0]
 
             if now - last_control_time >= 0.05:
                 last_control_time = now
                 payload = pack_control(command_motors, current_mode)
                 ser.write(CONTROL_HEADER + payload)
 
-            # 2. Read all available Serial bytes directly into buffer
+            # 3. Read all available Serial bytes directly into buffer
             if ser.in_waiting:
                 buffer.extend(ser.read(ser.in_waiting))
 
-            # 3. Parse ALL complete telemetry frames sequentially without discarding
+            # 4. Parse ALL complete telemetry frames sequentially without discarding
             while len(buffer) >= TOTAL_FRAME_SIZE:
                 idx = buffer.find(TELEMETRY_HEADER)
                 if idx == -1:
@@ -173,7 +325,7 @@ def main():
             time.sleep(0.001)
 
     except KeyboardInterrupt:
-        motors = [0,0,0,0]
+        motors = [0, 0, 0, 0]
         # Force MANUAL mode here so a zero ControlPacket actually zeroes thrust,
         # even if AUTONOMOUS mode was active when Ctrl+C was hit.
         payload = pack_control(motors, MODE_MANUAL)
@@ -189,7 +341,7 @@ def main():
             print(f"Average Throughput    : {total_frames / total_time:.2f} FPS")
         print("Exiting...")
     finally:
-        motors = [0,0,0,0]
+        motors = [0, 0, 0, 0]
         payload = pack_control(motors, MODE_MANUAL)
         ser.write(CONTROL_HEADER + payload)
         for _ in range(5):
@@ -197,9 +349,13 @@ def main():
             ser.flush()
             time.sleep(0.02)
         ser.close()
-        listener.stop()
-
+        if joystick is not None:
+            pygame.joystick.quit()
+        pygame.quit()
 
 
 if __name__ == "__main__":
-    main()
+    if "--calibrate" in sys.argv:
+        calibrate_controller()
+    else:
+        main()
