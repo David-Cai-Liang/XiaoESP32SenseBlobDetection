@@ -58,16 +58,38 @@ current_mode = MODE_MANUAL  # start safe: manual control until the pilot opts in
 joystick = None
 controller_button_prev = set()
 
+# Display state
+screen = None
+status_font = None
+STATUS_BG = (15, 15, 15)
+STATUS_FG = (0, 230, 110)
+
 
 def init_keyboard_window():
     """
     pygame.key needs a display surface with window focus to receive keyboard
     events, so we open a small control window. Click into it to give it focus.
+    This same window also mirrors whatever gets printed to the terminal.
     """
-    win = pygame.display.set_mode((420, 160))
+    global screen, status_font
+    screen = pygame.display.set_mode((760, 170))
     pygame.display.set_caption("Base Station Controls (click here for keyboard focus)")
     pygame.key.set_repeat(0)  # disabled: we want press edges, not OS key-repeat
-    return win
+    status_font = pygame.font.SysFont("consolas,couriernew,monospace", 16)
+    return screen
+
+
+def render_status(lines):
+    """Draw the same status lines shown in the terminal onto the pygame window."""
+    if screen is None:
+        return
+    screen.fill(STATUS_BG)
+    y = 8
+    for line in lines:
+        surf = status_font.render(line, True, STATUS_FG)
+        screen.blit(surf, (10, y))
+        y += surf.get_height() + 4
+    pygame.display.flip()
 
 
 def process_keyboard_events():
@@ -309,16 +331,31 @@ def main():
                         # command_motors is the new command if it exists
                         actual_motors = [m1, m2, m3, m4]
 
+                        # Build the status text once, then mirror it to both
+                        # the terminal and the pygame window.
+                        telemetry_line = (
+                            f"[TELEMETRY] Motors: {actual_motors} || "
+                            f"Vision: CX:{cx:3d} CY:{cy:3d} W:{w:3d} H:{h:3d} || "
+                            f"IMU: AX:{ax:5.1f} AY:{ay:5.1f} AZ:{az:5.1f}"
+                        )
+                        command_line = (
+                            f"[COMMAND] Mode: {MODE_NAMES[current_mode]:<21} || Motors: {command_motors}"
+                        )
+                        latency_line = (
+                            f"[LATENCY] Delta: {delta_ms:5.1f}ms | Avg: {avg_dt:5.1f}ms | "
+                            f"Rate: {fps:4.1f} FPS | Queue: {ser.in_waiting}B"
+                        )
+
                         # Terminal display
                         sys.stdout.write(
-                            f"\r\033[K[TELEMETRY] Motors: {actual_motors} || "
-                            f"Vision: CX:{cx:3d} CY:{cy:3d} W:{w:3d} H:{h:3d} || "
-                            f"IMU: AX:{ax:5.1f} AY:{ay:5.1f} AZ:{az:5.1f}\n"
-                            f"\r\033[K[COMMAND] Mode: {MODE_NAMES[current_mode]:<21} || Motors: {command_motors}\n"
-                            f"\r\033[K[LATENCY] Delta: {delta_ms:5.1f}ms | Avg: {avg_dt:5.1f}ms | "
-                            f"Rate: {fps:4.1f} FPS | Queue: {ser.in_waiting}B\033[A"
+                            f"\r\033[K{telemetry_line}\n"
+                            f"\r\033[K{command_line}\n"
+                            f"\r\033[K{latency_line}\033[A"
                         )
                         sys.stdout.flush()
+
+                        # pygame window display (same three lines)
+                        render_status([telemetry_line, command_line, latency_line])
                     else:
                         del buffer[:1]
 
